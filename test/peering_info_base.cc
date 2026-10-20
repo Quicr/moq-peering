@@ -1,0 +1,137 @@
+
+#include <doctest/doctest.h>
+#include <random>
+
+#include "peering/info_base.h"
+
+using namespace std::string_literals;
+using moq::peering::FullName;
+using moq::peering::NameSpace;
+
+std::vector<FullName>
+GenerateFullTrackNames(int count)
+{
+    std::srand(std::time({}));
+    std::vector<FullName> full_names;
+
+    for (int i = 0; i < count; i++) {
+        const int rvalue = std::rand();
+        const auto name = std::to_string(rvalue);
+        full_names.push_back(
+          { NameSpace{ "first"s, "second"s, "third"s, "final namespace tuple"s, "r=" + name },
+            { name.begin(), name.end() } });
+    }
+
+    return full_names;
+}
+
+TEST_CASE("Add/Remove Announces")
+{
+    using namespace moq::peering;
+
+    const auto full_names = GenerateFullTrackNames(30);
+    std::shared_ptr<InfoBase> ib = std::make_shared<InfoBase>();
+
+    // Add to info base
+    for (const auto& fn : full_names) {
+        const auto fn_hash = TrackHash(fn);
+        AnnounceInfo ai;
+        ai.fullname_hash = fn_hash.track_fullname_hash;
+        ai.name_space = fn.name_space, ai.name = fn.name;
+        ai.source_node_id = 0x12345678;
+
+        ib->AddAnnounce(ai);
+    }
+
+    // With 30 announces each with a unique full namespace path, we expect 30*5=150 prefix hash keys
+    // (each announce has 5 namespace levels, so 5 prefix paths)
+    // But after removing duplicates through the set, we get 34 unique prefix hashes
+    CHECK_EQ(ib->prefix_lookup_announces_.size(), 34);
+    // Verify entries exist
+    int total_hashes = 0;
+    for (const auto& [_, v] : ib->prefix_lookup_announces_) {
+        total_hashes += v.size();
+    }
+    CHECK_GT(total_hashes, 0);
+
+    // Remove first and last 5
+    for (int i = 0; i < 5; i++) {
+        AnnounceInfo ai;
+        ai.source_node_id = 0x12345678;
+
+        auto fn = full_names.at(i);
+        auto fn_hash = TrackHash(fn);
+
+        ai.fullname_hash = fn_hash.track_fullname_hash;
+        ai.name_space = fn.name_space, ai.name = fn.name;
+
+        ib->RemoveAnnounce(ai);
+
+        fn = full_names.at(full_names.size() - (i + 1));
+        fn_hash = TrackHash(fn);
+
+        ai.fullname_hash = fn_hash.track_fullname_hash;
+        ai.name_space = fn.name_space, ai.name = fn.name;
+
+        ib->RemoveAnnounce(ai);
+    }
+
+    // After removing 10 announces (first 5 and last 5), we should have 20 left
+    // Prefix lookup should still have entries for those 20
+    CHECK_GT(ib->prefix_lookup_announces_.size(), 0);
+    int total_remaining = 0;
+    for (const auto& [_, v] : ib->prefix_lookup_announces_) {
+        total_remaining += v.size();
+    }
+    // Should have at most 20 announces referenced
+    CHECK_LE(total_remaining, 20 * 5); // Each announce creates up to 5 prefix hashes
+
+    // Remove from info base
+    for (const auto& fn : full_names) {
+        const auto fn_hash = TrackHash(fn);
+        AnnounceInfo ai;
+        ai.fullname_hash = fn_hash.track_fullname_hash;
+        ai.name_space = fn.name_space, ai.name = fn.name;
+        ai.source_node_id = 0x12345678;
+
+        ib->RemoveAnnounce(ai);
+    }
+
+    CHECK(ib->prefix_lookup_announces_.empty());
+}
+
+TEST_CASE("Prefix match announces")
+{
+    using namespace moq::peering;
+
+    const auto full_names = GenerateFullTrackNames(30);
+    std::shared_ptr<InfoBase> ib = std::make_shared<InfoBase>();
+
+    // Add to info base
+    for (const auto& fn : full_names) {
+        const auto fn_hash = TrackHash(fn);
+        AnnounceInfo ai;
+        ai.fullname_hash = fn_hash.track_fullname_hash;
+        ai.name_space = fn.name_space, ai.name = fn.name;
+        ai.source_node_id = 0x12345678;
+
+        ib->AddAnnounce(ai);
+    }
+
+    const auto ns1 = NameSpace{ "first"s, "second"s, "third"s, "final namespace tuple"s, "invalid"s };
+    const auto ns2 = NameSpace{ "first"s, "second"s, "third"s };
+    const auto ns3 = NameSpace{ "first"s, "second"s };
+    const auto ns4 = NameSpace{ "first"s };
+
+    auto result = ib->GetAnnounceIds(ns1, {}, false);
+    CHECK_EQ(result.size(), 0);
+
+    result = ib->GetAnnounceIds(ns2, {}, false);
+    CHECK_EQ(result.size(), 1);
+
+    result = ib->GetAnnounceIds(ns3, {}, false);
+    CHECK_EQ(result.size(), 1);
+
+    result = ib->GetAnnounceIds(ns4, {}, false);
+    CHECK_EQ(result.size(), 1);
+}

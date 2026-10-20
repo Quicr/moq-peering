@@ -1,0 +1,171 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024 Cisco Systems
+// SPDX-License-Identifier: BSD-2-Clause
+#pragma once
+
+#include <spdlog/spdlog.h>
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace moq::peering {
+
+    /**
+     * @brief Role of this node in the relay network
+     */
+    enum class NodeType : uint8_t
+    {
+        kVia = 0, ///< Relay that only forwards between relays
+        kEdge,    ///< Relay that also has clients
+        kStub,    ///< Relay that is a stub edge
+    };
+
+    /**
+     * @brief How an announcement should be interpreted
+     */
+    enum class Announcement : uint8_t
+    {
+        kTrack = 0, ///< A single track name
+        kNamespace, ///< A namespace, which may cover many tracks
+    };
+
+    /**
+     * @brief How an object is carried between relays
+     */
+    enum class DataType : uint8_t
+    {
+        kDatagram = 0,
+        kExistingStream,
+        kNewStream,
+        kControlSignaling,
+        kFetchNewStream,
+        kFetchExistingStream,
+    };
+
+    /**
+     * @brief Track identity carried by the peering protocol
+     *
+     * @details The namespace is an ordered list of tuple values, the same shape MoQ uses, without
+     *      depending on a MoQ session. `name` is empty when the announcement is namespace-only.
+     */
+    struct TrackName
+    {
+        std::vector<std::vector<uint8_t>> name_space;
+        std::vector<uint8_t> name;
+    };
+
+    /**
+     * @brief Subscribe parameters exchanged with peers
+     */
+    struct SubscribeParams
+    {
+        uint8_t priority{ 0 };
+        uint64_t delivery_timeout_ms{ 0 };
+        uint64_t expires_ms{ 0 };
+        uint8_t forward{ 1 };
+        std::optional<uint64_t> new_group_request_id;
+    };
+
+    /**
+     * @brief Configuration for one peering node
+     *
+     * @details Transport certificates are file paths, never embedded. Leave `logger` empty to have
+     *      the library create one.
+     */
+    struct Config
+    {
+        std::string node_id;
+        NodeType node_type{ NodeType::kEdge };
+        uint16_t listen_port{ 33434 };
+        std::vector<std::pair<std::string, uint16_t>> peers;
+
+        std::string tls_cert_filename;
+        std::string tls_key_filename;
+
+        uint32_t object_ttl_ms{ 5000 };
+        uint64_t check_interval_ms{ 5000 };
+        uint32_t init_queue_size{ 5000 };
+        bool debug{ false };
+
+        std::shared_ptr<spdlog::logger> logger;
+    };
+
+    /**
+     * @brief Application callbacks
+     *
+     * @details Peering runs these on its own threads. The application translates them into whatever
+     *      protocol it implements, such as MoQ. Every method has an empty default.
+     *
+     *      SetDelegate(nullptr) before destroying the delegate. Callbacks already running may still
+     *      finish.
+     */
+    class Delegate
+    {
+      public:
+        virtual ~Delegate() = default;
+
+        /// A peer subscribed to this name. Subscribe locally if the application publishes it.
+        virtual void OnSubscribe(const TrackName& name, std::uint64_t track_hash, const SubscribeParams& params)
+        {
+            (void)name;
+            (void)track_hash;
+            (void)params;
+        }
+
+        /**
+         * @brief A peered subscribe was withdrawn
+         *
+         * @param track_hash           Full track name hash
+         * @param subscribers_remain   True when some other peer still subscribes to the track
+         */
+        virtual void OnUnsubscribe(std::uint64_t track_hash, bool subscribers_remain)
+        {
+            (void)track_hash;
+            (void)subscribers_remain;
+        }
+
+        /// A peer announced or withdrew a namespace.
+        virtual void OnNamespace(const std::vector<std::vector<uint8_t>>& name_space, bool withdrawn)
+        {
+            (void)name_space;
+            (void)withdrawn;
+        }
+
+        /// A peer announced or withdrew a track.
+        virtual void OnTrack(const TrackName& name, bool withdrawn)
+        {
+            (void)name;
+            (void)withdrawn;
+        }
+
+        /// Object bytes from a peer for a name this node subscribed to.
+        virtual void OnData(std::uint64_t track_hash,
+                            bool is_new_stream,
+                            std::optional<std::uint64_t> stream_id,
+                            std::shared_ptr<const std::vector<uint8_t>> data)
+        {
+            (void)track_hash;
+            (void)is_new_stream;
+            (void)stream_id;
+            (void)data;
+        }
+
+        /// The peer closed the stream that was carrying objects for a track.
+        virtual void OnPeerStreamClosed(std::uint64_t track_hash, std::uint64_t stream_id, bool reset)
+        {
+            (void)track_hash;
+            (void)stream_id;
+            (void)reset;
+        }
+
+        /// An outbound or accepted peering session finished its handshake.
+        virtual void OnPeerUp(std::uint64_t session_id) { (void)session_id; }
+
+        /// A peering session disconnected.
+        virtual void OnPeerDown(std::uint64_t session_id) { (void)session_id; }
+    };
+
+} // namespace moq::peering

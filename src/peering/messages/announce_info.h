@@ -1,0 +1,51 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024 Cisco Systems
+// SPDX-License-Identifier: BSD-2-Clause
+#pragma once
+
+#include "node_info.h"
+#include "peering/common.h"
+#include "peering/name.h"
+
+#include <set>
+
+namespace moq::peering {
+
+    /**
+     * @brief AnnounceInfo describes a publisher
+     *
+     * @details Announce info describes a publisher. Supports prefix matching.
+     *    This info is exchanged with the relay control server(s).
+     */
+    class AnnounceInfo
+    {
+      public:
+        /**
+         * Id of the originating source node
+         *
+         * When this node id matches self node, it means this is originated by this node, otherwise
+         * it was learned via peering.
+         */
+        NodeIdValueType source_node_id;
+
+        NameSpace name_space;
+        std::vector<uint8_t> name;
+        std::uint64_t fullname_hash{ 0 };
+        uint8_t flags{ 0 }; // LSB 0 indicates publish, 1 indicates publish namespace
+
+        /**
+         * @brief Encode node object into bytes that can be written on the wire
+         */
+        std::vector<uint8_t> Serialize(bool include_common_header, bool withdraw = false) const;
+
+        AnnounceInfo() = default;
+        AnnounceInfo(NodeIdValueType source_node_id, const FullName& full_name, bool publish = true);
+        AnnounceInfo(std::span<uint8_t const> serialized_data);
+
+        uint32_t SizeBytes() const;
+
+      private:
+    };
+
+    std::vector<uint8_t>& operator<<(std::vector<uint8_t>& data, const AnnounceInfo& announce_info);
+
+} // namespace moq::peering
