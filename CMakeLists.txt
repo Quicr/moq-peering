@@ -71,11 +71,10 @@ add_library(moq-peering STATIC
     src/peering/engine.cc
     src/peering/peer_session.cc
     src/peering/quic_transport.cc
-    src/peering/info_base.cc
+    src/peering/forwarding_base.cc
     src/peering/messages/connect.cc
     src/peering/messages/connect_response.cc
-    src/peering/messages/subscribe_info.cc
-    src/peering/messages/announce_info.cc
+    src/peering/messages/info_base.cc
     src/peering/messages/node_info.cc
     src/peering/messages/subscribe_node_set.cc
     src/peering/messages/data_header.cc
@@ -90,6 +89,12 @@ target_include_directories(moq-peering
 )
 
 target_link_libraries(moq-peering PUBLIC picoquic-core spdlog::spdlog)
+
+# Static picoquic calls Winsock and IP Helper. Those imports are resolved when
+# the final executable is linked, so they have to travel with this library.
+if(WIN32)
+    target_link_libraries(moq-peering PUBLIC ws2_32 iphlpapi crypt32 bcrypt)
+endif()
 
 target_compile_options(moq-peering
     PRIVATE
@@ -107,5 +112,6 @@ if(MOQ_PEERING_BUILD_EXAMPLES)
 endif()
 
 if(MOQ_PEERING_BUILD_TESTS)
+    enable_testing()
     add_subdirectory(test)
 endif()

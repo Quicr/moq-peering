@@ -15,21 +15,21 @@ namespace moq::peering {
     namespace {
         void ApplySubscribeAttributes(SubscribeInfo& info, const SubscribeParams& params)
         {
-            info.priority = params.priority;
-            info.delivery_timeout = params.delivery_timeout_ms;
-            info.expires = params.expires_ms;
-            info.forward = params.forward;
-            info.new_group_request_id = params.new_group_request_id;
+            info.details.priority = params.priority;
+            info.details.delivery_timeout = params.delivery_timeout_ms;
+            info.details.expires = params.expires_ms;
+            info.details.forward = params.forward;
+            info.details.new_group_request_id = params.new_group_request_id;
         }
 
         SubscribeParams ToParams(const SubscribeInfo& info)
         {
             SubscribeParams params;
-            params.priority = info.priority;
-            params.delivery_timeout_ms = info.delivery_timeout;
-            params.expires_ms = info.expires;
-            params.forward = static_cast<uint8_t>(info.forward);
-            params.new_group_request_id = info.new_group_request_id;
+            params.priority = info.details.priority;
+            params.delivery_timeout_ms = info.details.delivery_timeout;
+            params.expires_ms = info.details.expires;
+            params.forward = static_cast<uint8_t>(info.details.forward);
+            params.new_group_request_id = info.details.new_group_request_id;
             return params;
         }
 
@@ -56,23 +56,24 @@ namespace moq::peering {
             return { ToNamespace(name.name_space), name.name };
         }
 
-        InfoBase::StreamKey SubgroupStreamKey(uint64_t group_id, uint64_t subgroup_id)
+        ForwardingBase::StreamKey SubgroupStreamKey(uint64_t group_id, uint64_t subgroup_id)
         {
             return { .a = group_id, .b = subgroup_id };
         }
 
-        InfoBase::StreamKey IngressStreamKey(uint64_t stream_id)
+        ForwardingBase::StreamKey IngressStreamKey(uint64_t stream_id)
         {
             return { .a = stream_id, .b = 0 };
         }
 
         void AdvanceSeqIfUnchanged(SubscribeInfo& info, uint16_t seq_before)
         {
-            if (info.seq != seq_before) {
+            if (info.details.seq != seq_before) {
                 return;
             }
 
-            info.seq = info.seq < 0xFFFF ? static_cast<uint16_t>(info.seq + 1) : static_cast<uint16_t>(0);
+            info.details.seq =
+              info.details.seq < 0xFFFF ? static_cast<uint16_t>(info.details.seq + 1) : static_cast<uint16_t>(0);
         }
     }
 
@@ -135,9 +136,9 @@ namespace moq::peering {
           LOGGER,
           "Subscribe info received peer_session_id: {} fullname: {} namespace: {} source_node: {} withdraw: {}",
           peer_session_id,
-          subscribe_info.track_hash.track_fullname_hash,
-          subscribe_info.track_hash.track_namespace_hash,
-          NodeId().Value(subscribe_info.source_node_id),
+          subscribe_info.details.track_hash.track_fullname_hash,
+          subscribe_info.details.track_hash.track_namespace_hash,
+          NodeId().Value(subscribe_info.track.source_node_id),
           withdraw);
 
         std::shared_ptr<PeerSession> peer_session;
@@ -174,35 +175,37 @@ namespace moq::peering {
         if (not withdraw) {
             uint64_t update_ref = rand();
 
-            const auto priority = subscribe_info.priority;
-            auto bp_it = info_base_->nodes_best_.find(subscribe_info.source_node_id);
+            const auto priority = subscribe_info.details.priority;
+            auto bp_it = info_base_->nodes_best_.find(subscribe_info.track.source_node_id);
             if (bp_it != info_base_->nodes_best_.end()) {
                 const auto& peer_session = bp_it->second.lock();
                 SPDLOG_LOGGER_DEBUG(
                   LOGGER,
                   "Best peer session for subscribe fullname: {} source_node: {} is via peer_session_id: {}",
-                  subscribe_info.track_hash.track_fullname_hash,
-                  subscribe_info.source_node_id,
+                  subscribe_info.details.track_hash.track_fullname_hash,
+                  subscribe_info.track.source_node_id,
                   peer_session->GetSessionId());
 
-                if (auto [sns_id, is_new] = peer_session->AddSubscribeSourceNode(
-                      subscribe_info.track_hash.track_fullname_hash, subscribe_info.source_node_id, priority);
+                if (auto [sns_id, is_new] =
+                      peer_session->AddSubscribeSourceNode(subscribe_info.details.track_hash.track_fullname_hash,
+                                                           subscribe_info.track.source_node_id,
+                                                           priority);
                     is_new) {
                     SPDLOG_LOGGER_INFO(LOGGER,
                                        "New source added to peer session for subscribe fullname: {} source_node: {} is "
                                        "via peer_session_id: {} sns_id: {}",
-                                       subscribe_info.track_hash.track_fullname_hash,
-                                       subscribe_info.source_node_id,
+                                       subscribe_info.details.track_hash.track_fullname_hash,
+                                       subscribe_info.track.source_node_id,
                                        peer_session->GetSessionId(),
                                        sns_id);
 
                     if (auto [_, is_new] = info_base_->client_fib_.try_emplace(
-                          { subscribe_info.track_hash.track_fullname_hash, peer_session_id },
-                          InfoBase::FibEntry{ update_ref, {}, sns_id, bp_it->second });
+                          { subscribe_info.details.track_hash.track_fullname_hash, peer_session_id },
+                          ForwardingBase::FibEntry{ update_ref, {}, sns_id, bp_it->second });
                         is_new) {
                         SPDLOG_LOGGER_INFO(LOGGER,
                                            "New subscribe fullname: {}, sending subscribe to client manager",
-                                           subscribe_info.track_hash.track_fullname_hash);
+                                           subscribe_info.details.track_hash.track_fullname_hash);
                     }
                 }
             }
@@ -210,44 +213,44 @@ namespace moq::peering {
             if (auto* delegate = LoadDelegate()) {
                 SPDLOG_LOGGER_INFO(LOGGER,
                                    "Notifying delegate of subscribe fullname: {} new_group_request: {}",
-                                   subscribe_info.track_hash.track_fullname_hash,
-                                   subscribe_info.new_group_request_id.has_value()
-                                     ? static_cast<std::int64_t>(*subscribe_info.new_group_request_id)
+                                   subscribe_info.details.track_hash.track_fullname_hash,
+                                   subscribe_info.details.new_group_request_id.has_value()
+                                     ? static_cast<std::int64_t>(*subscribe_info.details.new_group_request_id)
                                      : std::int64_t{ -1 });
-                delegate->OnSubscribe(ToTrackName(subscribe_info.name_space, subscribe_info.name),
-                                      subscribe_info.track_hash.track_fullname_hash,
+                delegate->OnSubscribe(ToTrackName(subscribe_info.track.name_space, subscribe_info.track.name),
+                                      subscribe_info.details.track_hash.track_fullname_hash,
                                       ToParams(subscribe_info));
             }
         } else {
-            auto bp_it = info_base_->nodes_best_.find(subscribe_info.source_node_id);
+            auto bp_it = info_base_->nodes_best_.find(subscribe_info.track.source_node_id);
             if (bp_it != info_base_->nodes_best_.end()) {
                 const auto& peer_session = bp_it->second.lock();
                 if (const auto [_, sns_removed] = peer_session->RemoveSubscribeSourceNode(
-                      subscribe_info.track_hash.track_fullname_hash, subscribe_info.source_node_id);
+                      subscribe_info.details.track_hash.track_fullname_hash, subscribe_info.track.source_node_id);
                     sns_removed) {
                     SPDLOG_LOGGER_INFO(LOGGER,
                                        "No subscribe nodes left via peer session {}, removed subscribe fullname: {}",
                                        peer_session->GetSessionId(),
-                                       subscribe_info.track_hash.track_fullname_hash);
+                                       subscribe_info.details.track_hash.track_fullname_hash);
 
-                    const auto cfib_it =
-                      info_base_->client_fib_.find({ subscribe_info.track_hash.track_fullname_hash, peer_session_id });
+                    const auto cfib_it = info_base_->client_fib_.find(
+                      { subscribe_info.details.track_hash.track_fullname_hash, peer_session_id });
                     if (cfib_it != info_base_->client_fib_.end()) {
                         CloseFibStreams(cfib_it->second);
                         info_base_->client_fib_.erase(cfib_it);
                     }
 
-                    if (not HasSubscribers(subscribe_info.track_hash.track_fullname_hash)) {
+                    if (not HasSubscribers(subscribe_info.details.track_hash.track_fullname_hash)) {
                         SPDLOG_LOGGER_INFO(LOGGER,
                                            "No peers left for subscribe fullname: {}",
-                                           subscribe_info.track_hash.track_fullname_hash);
+                                           subscribe_info.details.track_hash.track_fullname_hash);
                     }
                 }
             }
 
             if (auto* delegate = LoadDelegate()) {
-                delegate->OnUnsubscribe(subscribe_info.track_hash.track_fullname_hash,
-                                        HasSubscribers(subscribe_info.track_hash.track_fullname_hash));
+                delegate->OnUnsubscribe(subscribe_info.details.track_hash.track_fullname_hash,
+                                        HasSubscribers(subscribe_info.details.track_hash.track_fullname_hash));
             }
         }
 
@@ -256,11 +259,9 @@ namespace moq::peering {
         // ignore
     }
 
-    void Engine::AnnounceInfoReceived(PeerSessionId peer_session_id,
-                                           const AnnounceInfo& announce_info,
-                                           bool withdraw)
+    void Engine::AnnounceInfoReceived(PeerSessionId peer_session_id, const AnnounceInfo& announce_info, bool withdraw)
     try {
-        auto th = TrackHash(announce_info.name_space, announce_info.name);
+        auto th = TrackHash(announce_info.track.name_space, announce_info.track.name);
         SPDLOG_LOGGER_INFO(LOGGER,
                            "Announce info received peer_session_id: {} namespace hash: {} name hash: {} fullname hash: "
                            "{} == {} withdraw: {} flags: {}",
@@ -268,9 +269,9 @@ namespace moq::peering {
                            th.track_namespace_hash,
                            th.track_name_hash,
                            th.track_fullname_hash,
-                           announce_info.fullname_hash,
+                           announce_info.track.fullname_hash,
                            withdraw,
-                           static_cast<int>(announce_info.flags));
+                           static_cast<int>(announce_info.details.flags));
 
         auto peer_session = GetPeerSession(peer_session_id);
         if (not withdraw && !info_base_->AddAnnounce(announce_info)) {
@@ -294,8 +295,8 @@ namespace moq::peering {
         }
 
         if (auto* delegate = LoadDelegate()) {
-            const auto name = ToTrackName(announce_info.name_space, announce_info.name);
-            if (announce_info.flags & 1) {
+            const auto name = ToTrackName(announce_info.track.name_space, announce_info.track.name);
+            if (announce_info.details.flags & 1) {
                 delegate->OnNamespace(name.name_space, withdraw);
             } else {
                 delegate->OnTrack(name, withdraw);
@@ -307,8 +308,8 @@ namespace moq::peering {
     }
 
     void Engine::SessionChanged(PeerSessionId peer_session_id,
-                                     PeerSession::StatusValue status,
-                                     [[maybe_unused]] const NodeInfo& remote_node_info)
+                                PeerSession::StatusValue status,
+                                [[maybe_unused]] const NodeInfo& remote_node_info)
     {
         switch (status) {
             case PeerSession::StatusValue::kConnected: {
@@ -347,13 +348,13 @@ namespace moq::peering {
                          *      best path. If no best path can be found, remove subscribe info.
                          */
                         for (auto& [_, si] : subs.second) {
-                            auto cfib_it =
-                              info_base_->client_fib_.find({ si.track_hash.track_fullname_hash, peer_session_id });
+                            auto cfib_it = info_base_->client_fib_.find(
+                              { si.details.track_hash.track_fullname_hash, peer_session_id });
                             if (cfib_it != info_base_->client_fib_.end()) {
                                 info_base_->client_fib_.erase(cfib_it);
 
                                 ib_lock.unlock();
-                                auto best_peer = info_base_->GetBestPeerSession(si.source_node_id);
+                                auto best_peer = info_base_->GetBestPeerSession(si.track.source_node_id);
                                 ib_lock.lock();
 
                                 if (const auto& peer_sess = best_peer.lock()) {
@@ -405,12 +406,12 @@ namespace moq::peering {
     }
 
     void Engine::ForwardPeerData(PeerSessionId peer_session_id,
-                                      bool is_new_stream,
-                                      uint64_t stream_id,
-                                      DataHeader data_header,
-                                      std::shared_ptr<const std::vector<uint8_t>> data,
-                                      uint64_t data_offset,
-                                      SendFlags eflags)
+                                 bool is_new_stream,
+                                 uint64_t stream_id,
+                                 DataHeader data_header,
+                                 std::shared_ptr<const std::vector<uint8_t>> data,
+                                 uint64_t data_offset,
+                                 SendFlags eflags)
     {
         std::unique_lock _(info_base_->mutex_); // TODO: See about removing this lock
         auto it = info_base_->peer_fib_.find({ peer_session_id, data_header.sns_id });
@@ -439,11 +440,13 @@ namespace moq::peering {
 
                     if (auto* delegate = LoadDelegate()) {
                         if (eflags.reliable) {
-                            delegate->OnData(
-                              si_it->second.track_hash.track_fullname_hash, is_new_stream, stream_id, client_data);
+                            delegate->OnData(si_it->second.details.track_hash.track_fullname_hash,
+                                             is_new_stream,
+                                             stream_id,
+                                             client_data);
                         } else {
                             delegate->OnData(
-                              si_it->second.track_hash.track_fullname_hash, false, std::nullopt, client_data);
+                              si_it->second.details.track_hash.track_fullname_hash, false, std::nullopt, client_data);
                         }
                     }
                     continue;
@@ -490,8 +493,8 @@ namespace moq::peering {
                 out_peer_sess->SendData(data_header.priority, data_header.ttl, out_stream, eflags, std::move(data_out));
             }
         } else if (auto peer_sess = GetPeerSession(peer_session_id)) {
-            peer_sess->StashPending(PeerSession::PendingData{
-              is_new_stream, stream_id, data_header, std::move(data), data_offset, eflags });
+            peer_sess->StashPending(
+              PeerSession::PendingData{ is_new_stream, stream_id, data_header, std::move(data), data_offset, eflags });
         }
     }
 
@@ -500,10 +503,7 @@ namespace moq::peering {
         return info_base_->GetAnnounceIds(full_name.name_space, full_name.name, false);
     }
 
-    void Engine::EndSubgroup(std::uint64_t track_full_name_hash,
-                                  uint64_t group_id,
-                                  uint64_t subgroup_id,
-                                  bool reset)
+    void Engine::EndSubgroup(std::uint64_t track_full_name_hash, uint64_t group_id, uint64_t subgroup_id, bool reset)
     {
         const auto key = SubgroupStreamKey(group_id, subgroup_id);
 
@@ -537,12 +537,12 @@ namespace moq::peering {
     }
 
     void Engine::SendData(std::uint64_t track_full_name_hash,
-                                     uint8_t priority,
-                                     uint32_t ttl,
-                                     DataType type,
-                                     uint64_t group_id,
-                                     uint64_t subgroup_id,
-                                     std::shared_ptr<const std::vector<uint8_t>> data)
+                          uint8_t priority,
+                          uint32_t ttl,
+                          DataType type,
+                          uint64_t group_id,
+                          uint64_t subgroup_id,
+                          std::shared_ptr<const std::vector<uint8_t>> data)
     {
         DataHeader data_header;
         data_header.type = type;
@@ -646,7 +646,7 @@ namespace moq::peering {
             for (const auto& sess : client_peer_sessions_) {
                 SPDLOG_LOGGER_DEBUG(LOGGER,
                                     "Sending subscribe withdraw fullname: {} peer_session_id: {}",
-                                    si->track_hash.track_fullname_hash,
+                                    si->details.track_hash.track_fullname_hash,
                                     sess.first);
                 sess.second->SendSubscribeInfo(*si, true);
             }
@@ -654,7 +654,7 @@ namespace moq::peering {
             for (const auto& sess : server_peer_sessions_) {
                 SPDLOG_LOGGER_DEBUG(LOGGER,
                                     "Sending subscribe withdraw fullname: {} peer_session_id: {}",
-                                    si->track_hash.track_fullname_hash,
+                                    si->details.track_hash.track_fullname_hash,
                                     sess.first);
                 sess.second->SendSubscribeInfo(*si, true);
             }
@@ -669,7 +669,7 @@ namespace moq::peering {
         if (auto si = info_base_->GetSubscribe(th.track_fullname_hash, node_info_.id)) {
             ApplySubscribeAttributes(*si, params);
 
-            const auto seq_before = si->seq;
+            const auto seq_before = si->details.seq;
             for (const auto& sess : client_peer_sessions_) {
                 SPDLOG_LOGGER_DEBUG(LOGGER,
                                     "Sending subscribe update fullname: {} peer_session_id: {} priority: {} "
@@ -708,17 +708,18 @@ namespace moq::peering {
         const auto track_full_name = ToFullName(track_name);
         SubscribeInfo si;
 
-        si.track_hash = TrackHash(track_full_name);
-        si.name_space = track_full_name.name_space;
-        si.name = track_full_name.name;
-        si.source_node_id = node_info_.id;
+        si.details.track_hash = TrackHash(track_full_name);
+        si.track.fullname_hash = si.details.track_hash.track_fullname_hash;
+        si.track.name_space = track_full_name.name_space;
+        si.track.name = track_full_name.name;
+        si.track.source_node_id = node_info_.id;
         ApplySubscribeAttributes(si, params);
 
-        const auto seq_before = si.seq;
+        const auto seq_before = si.details.seq;
         for (const auto& sess : client_peer_sessions_) {
             SPDLOG_LOGGER_DEBUG(LOGGER,
                                 "Sending subscribe fullname: {} peer_session_id: {}",
-                                si.track_hash.track_fullname_hash,
+                                si.details.track_hash.track_fullname_hash,
                                 sess.first);
             sess.second->SendSubscribeInfo(si, false);
         }
@@ -726,7 +727,7 @@ namespace moq::peering {
         for (const auto& sess : server_peer_sessions_) {
             SPDLOG_LOGGER_DEBUG(LOGGER,
                                 "Sending subscribe fullname: {} peer_session_id: {}",
-                                si.track_hash.track_fullname_hash,
+                                si.details.track_hash.track_fullname_hash,
                                 sess.first);
             sess.second->SendSubscribeInfo(si, false);
         }
@@ -741,13 +742,13 @@ namespace moq::peering {
         const bool publish_namespace = kind == Announcement::kNamespace;
         AnnounceInfo ai;
 
-        ai.name_space = track_full_name.name_space;
-        ai.name = track_full_name.name;
-        ai.source_node_id = node_info_.id;
-        ai.flags = publish_namespace ? 1 : 0;
+        ai.track.name_space = track_full_name.name_space;
+        ai.track.name = track_full_name.name;
+        ai.track.source_node_id = node_info_.id;
+        ai.details.flags = publish_namespace ? 1 : 0;
 
         auto th = TrackHash(track_full_name);
-        ai.fullname_hash = th.track_fullname_hash;
+        ai.track.fullname_hash = th.track_fullname_hash;
 
         if (not withdraw) {
             info_base_->AddAnnounce(ai);
@@ -795,40 +796,42 @@ namespace moq::peering {
                         continue;
                     const auto& sub_info = si_it.second;
 
-                    if (track_full_name.name_space.HasSamePrefix(sub_info.name_space)) {
+                    if (track_full_name.name_space.HasSamePrefix(sub_info.track.name_space)) {
 
-                        if (sub_info.source_node_id == node_info_.id)
+                        if (sub_info.track.source_node_id == node_info_.id)
                             continue;
 
-                        auto bp_it = info_base_->nodes_best_.find(sub_info.source_node_id);
+                        auto bp_it = info_base_->nodes_best_.find(sub_info.track.source_node_id);
                         if (bp_it != info_base_->nodes_best_.end()) {
                             const auto& peer_session = bp_it->second.lock();
                             SPDLOG_LOGGER_DEBUG(LOGGER,
                                                 "Best peer session for subscribe fullname: {} source_node: {} is "
                                                 "via peer_session_id: {}",
-                                                sub_info.track_hash.track_fullname_hash,
-                                                sub_info.source_node_id,
+                                                sub_info.details.track_hash.track_fullname_hash,
+                                                sub_info.track.source_node_id,
                                                 peer_session->GetSessionId());
 
-                            if (auto [sns_id, is_new] = peer_session->AddSubscribeSourceNode(
-                                  sub_info.track_hash.track_fullname_hash, sub_info.source_node_id, sub_info.priority);
+                            if (auto [sns_id, is_new] =
+                                  peer_session->AddSubscribeSourceNode(sub_info.details.track_hash.track_fullname_hash,
+                                                                       sub_info.track.source_node_id,
+                                                                       sub_info.details.priority);
                                 is_new) {
                                 SPDLOG_LOGGER_INFO(
                                   LOGGER,
                                   "New source added to peer session for subscribe fullname: {} source_node: {} is "
                                   "via peer_session_id: {} sns_id: {}",
-                                  sub_info.track_hash.track_fullname_hash,
-                                  sub_info.source_node_id,
+                                  sub_info.details.track_hash.track_fullname_hash,
+                                  sub_info.track.source_node_id,
                                   peer_session->GetSessionId(),
                                   sns_id);
 
                                 if (auto [_, is_new] = info_base_->client_fib_.try_emplace(
-                                      { sub_info.track_hash.track_fullname_hash, peer_session->GetSessionId() },
-                                      InfoBase::FibEntry{ update_ref, {}, sns_id, bp_it->second });
+                                      { sub_info.details.track_hash.track_fullname_hash, peer_session->GetSessionId() },
+                                      ForwardingBase::FibEntry{ update_ref, {}, sns_id, bp_it->second });
                                     is_new) {
                                     SPDLOG_LOGGER_INFO(LOGGER,
                                                        "New subscribe fullname: {} added to client fib",
-                                                       sub_info.track_hash.track_fullname_hash);
+                                                       sub_info.details.track_hash.track_fullname_hash);
                                 }
                             }
                         }
@@ -836,9 +839,9 @@ namespace moq::peering {
                         if (auto* delegate = LoadDelegate()) {
                             SPDLOG_LOGGER_INFO(LOGGER,
                                                "Notifying delegate of subscribe fullname: {}",
-                                               sub_info.track_hash.track_fullname_hash);
-                            delegate->OnSubscribe(ToTrackName(sub_info.name_space, sub_info.name),
-                                                  sub_info.track_hash.track_fullname_hash,
+                                               sub_info.details.track_hash.track_fullname_hash);
+                            delegate->OnSubscribe(ToTrackName(sub_info.track.name_space, sub_info.track.name),
+                                                  sub_info.details.track_hash.track_fullname_hash,
                                                   ToParams(sub_info));
                         }
                     }
@@ -852,7 +855,7 @@ namespace moq::peering {
     // -------------------------------------------------------------
 
     Engine::Engine(Config config)
-      : info_base_(std::make_shared<InfoBase>())
+      : info_base_(std::make_shared<ForwardingBase>())
       , config_(std::move(config))
     {
         if (!config_.logger) {
@@ -871,10 +874,10 @@ namespace moq::peering {
         node_info_.id = std::hash<std::string>{}(config_.node_id);
         node_info_.type = config_.node_type;
 
-        server_endpoint_ = QuicEndpoint::Listen(
-          config_.tls_cert_filename, config_.tls_key_filename, config_.listen_port, [this](const auto& connection) {
-              NewPeerConnection(connection);
-          });
+        server_endpoint_ = QuicEndpoint::Listen(config_.tls_cert_filename,
+                                                config_.tls_key_filename,
+                                                config_.listen_port,
+                                                [this](const auto& connection) { NewPeerConnection(connection); });
 
         for (const auto& [host, port] : config_.peers) {
             CreatePeerSession(host, port);
@@ -941,7 +944,7 @@ namespace moq::peering {
 
                 if (node_id == node_info_.id) {
                     // Self
-                    fib_it->second[0] = InfoBase::FibEntry{ update_ref, {} };
+                    fib_it->second[0] = ForwardingBase::FibEntry{ update_ref, {} };
                     continue;
                 }
 
@@ -953,7 +956,7 @@ namespace moq::peering {
 
                     // Update or create fib record
                     fib_it->second[peer_sess->GetSessionId()] =
-                      InfoBase::FibEntry{ update_ref, {}, out_sns_id, peer_sess_weak };
+                      ForwardingBase::FibEntry{ update_ref, {}, out_sns_id, peer_sess_weak };
                 }
             }
         }
@@ -965,7 +968,7 @@ namespace moq::peering {
             for (const auto& node_id : sns.nodes) {
                 if (node_id == node_info_.id) {
                     // Self
-                    fib_it->second[0] = InfoBase::FibEntry{ update_ref, {} };
+                    fib_it->second[0] = ForwardingBase::FibEntry{ update_ref, {} };
                     continue;
                 }
 
@@ -979,7 +982,7 @@ namespace moq::peering {
                           peer_sess->AddPeerSnsSourceNode(peer_session.GetSessionId(), sns.id, node_id, sns.priority);
 
                         fib_it->second[peer_sess->GetSessionId()] =
-                          InfoBase::FibEntry{ update_ref, {}, o_sns_id, peer_sess_weak };
+                          ForwardingBase::FibEntry{ update_ref, {}, o_sns_id, peer_sess_weak };
 
                         SPDLOG_LOGGER_DEBUG(LOGGER,
                                             "SNS added peer session: {} sns id: {} added source node_id: {}",
@@ -1040,7 +1043,7 @@ namespace moq::peering {
         }
     }
 
-    void Engine::InfoBaseSyncPeer(PeerSession& peer_session)
+    void Engine::ForwardingBaseSyncPeer(PeerSession& peer_session)
     {
         std::lock_guard _(mutex_);
 
@@ -1067,7 +1070,7 @@ namespace moq::peering {
 
         for (const auto& [th, anno_item] : info_base_->announces_) {
             for (const auto& [_, anno_info] : anno_item) {
-                if (peer_session.remote_node_info_.id == anno_info.source_node_id)
+                if (peer_session.remote_node_info_.id == anno_info.track.source_node_id)
                     continue; // Skip, don't send self or remote to self
 
                 peer_session.SendAnnounceInfo(anno_info);
@@ -1077,7 +1080,7 @@ namespace moq::peering {
         // Send all subscribes
         for (auto& [tfh, sub_item] : info_base_->subscribes_) {
             for (auto& [_, sub_info] : sub_item) {
-                if (peer_session.remote_node_info_.id == sub_info.source_node_id)
+                if (peer_session.remote_node_info_.id == sub_info.track.source_node_id)
                     continue; // Skip, don't send self or remote to self
 
                 peer_session.SendSubscribeInfo(sub_info);
@@ -1278,7 +1281,7 @@ namespace moq::peering {
         }
     }
 
-    void Engine::CloseFibStreams(InfoBase::FibEntry& entry)
+    void Engine::CloseFibStreams(ForwardingBase::FibEntry& entry)
     {
         const auto peer_sess = entry.peer_session.lock();
         if (peer_sess != nullptr) {
@@ -1291,10 +1294,10 @@ namespace moq::peering {
     }
 
     void Engine::CloseStream(PeerSessionId peer_session_id,
-                                  SubscribeNodeSetId sns,
-                                  uint64_t stream_id,
-                                  uint64_t track_fullname_hash,
-                                  StreamClose flag)
+                             SubscribeNodeSetId sns,
+                             uint64_t stream_id,
+                             uint64_t track_fullname_hash,
+                             StreamClose flag)
     {
         // Close all egress peer streams related to the ingress stream close
         auto it = info_base_->peer_fib_.find({ peer_session_id, sns });
@@ -1305,8 +1308,7 @@ namespace moq::peering {
                 if (out_peer_sess_id == 0) {
                     // Client manager
                     if (auto* delegate = LoadDelegate()) {
-                        delegate->OnPeerStreamClosed(
-                          track_fullname_hash, stream_id, flag == StreamClose::kReset);
+                        delegate->OnPeerStreamClosed(track_fullname_hash, stream_id, flag == StreamClose::kReset);
                     }
 
                     continue;

@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024 Cisco Systems
 // SPDX-License-Identifier: BSD-2-Clause
 
-#include "info_base.h"
+#include "forwarding_base.h"
 #include "name.h"
 
 namespace moq::peering {
-    bool InfoBase::AddNode(std::shared_ptr<PeerSession> peer_session, const NodeInfo& node_info)
+    bool ForwardingBase::AddNode(std::shared_ptr<PeerSession> peer_session, const NodeInfo& node_info)
     {
         std::lock_guard _(mutex_);
 
@@ -23,7 +23,7 @@ namespace moq::peering {
         return SelectBestNode(node_info.id);
     }
 
-    void InfoBase::RemoveNode(PeerSessionId peer_session_id, NodeIdValueType node_id)
+    void ForwardingBase::RemoveNode(PeerSessionId peer_session_id, NodeIdValueType node_id)
     {
         std::lock_guard _(mutex_);
 
@@ -44,7 +44,7 @@ namespace moq::peering {
         }
     }
 
-    void InfoBase::PurgePeerSessionInfo(PeerSessionId peer_session_id)
+    void ForwardingBase::PurgePeerSessionInfo(PeerSessionId peer_session_id)
     {
         std::vector<NodeIdValueType> node_ids;
         node_ids.reserve(10);
@@ -80,12 +80,12 @@ namespace moq::peering {
         }
     }
 
-    bool InfoBase::HasSubscribers(const SubscribeInfo& subscribe_info)
+    bool ForwardingBase::HasSubscribers(const SubscribeInfo& subscribe_info)
     {
-        auto it = subscribes_.find(subscribe_info.track_hash.track_fullname_hash);
+        auto it = subscribes_.find(subscribe_info.track.fullname_hash);
         if (it != subscribes_.end()) {
             for (const auto& si : it->second) {
-                if (si.second.source_node_id != subscribe_info.source_node_id) {
+                if (si.second.track.source_node_id != subscribe_info.track.source_node_id) {
                     return true;
                 }
             }
@@ -94,13 +94,13 @@ namespace moq::peering {
         return false;
     }
 
-    bool InfoBase::AddSubscribe(const SubscribeInfo& subscribe_info)
+    bool ForwardingBase::AddSubscribe(const SubscribeInfo& subscribe_info)
     {
         std::lock_guard _(mutex_);
 
-        auto it = subscribes_[subscribe_info.track_hash.track_fullname_hash].find(subscribe_info.source_node_id);
-        if (it != subscribes_[subscribe_info.track_hash.track_fullname_hash].end()) {
-            const int seq_diff = it->second.seq - subscribe_info.seq;
+        auto it = subscribes_[subscribe_info.track.fullname_hash].find(subscribe_info.track.source_node_id);
+        if (it != subscribes_[subscribe_info.track.fullname_hash].end()) {
+            const int seq_diff = it->second.details.seq - subscribe_info.details.seq;
             if (seq_diff == 0) {
                 // TODO(tievens): Revisit to check on order of received or delayed messages
                 return false; // ignore
@@ -110,18 +110,17 @@ namespace moq::peering {
             return true;
         }
 
-        subscribes_[subscribe_info.track_hash.track_fullname_hash].emplace(subscribe_info.source_node_id,
-                                                                           subscribe_info);
+        subscribes_[subscribe_info.track.fullname_hash].emplace(subscribe_info.track.source_node_id, subscribe_info);
         return true;
     }
 
-    bool InfoBase::RemoveSubscribe(const SubscribeInfo& subscribe_info)
+    bool ForwardingBase::RemoveSubscribe(const SubscribeInfo& subscribe_info)
     {
         std::lock_guard _(mutex_);
 
-        auto it = subscribes_.find(subscribe_info.track_hash.track_fullname_hash);
+        auto it = subscribes_.find(subscribe_info.track.fullname_hash);
         if (it != subscribes_.end()) {
-            auto sub_it = it->second.find(subscribe_info.source_node_id);
+            auto sub_it = it->second.find(subscribe_info.track.source_node_id);
             if (sub_it != it->second.end()) {
                 // TODO(tievens): Revisit to check on order of received or delayed messages
                 it->second.erase(sub_it);
@@ -137,7 +136,7 @@ namespace moq::peering {
         return false;
     }
 
-    std::optional<SubscribeInfo> InfoBase::GetSubscribe(uint64_t track_fullname_hash, NodeIdValueType src_node_id)
+    std::optional<SubscribeInfo> ForwardingBase::GetSubscribe(uint64_t track_fullname_hash, NodeIdValueType src_node_id)
     {
         std::lock_guard _(mutex_);
 
@@ -149,7 +148,7 @@ namespace moq::peering {
         return std::nullopt;
     }
 
-    std::vector<std::size_t> InfoBase::PrefixHashNamespaceTuples(const NameSpace& name_space)
+    std::vector<std::size_t> ForwardingBase::PrefixHashNamespaceTuples(const NameSpace& name_space)
     {
         const auto& entries = name_space.GetHashes();
         std::vector<std::size_t> hashes(entries.size());
@@ -163,22 +162,22 @@ namespace moq::peering {
         return hashes;
     }
 
-    bool InfoBase::AddAnnounce(const AnnounceInfo& announce_info)
+    bool ForwardingBase::AddAnnounce(const AnnounceInfo& announce_info)
     {
         std::lock_guard _(mutex_);
 
         auto [__, is_new] =
-          announces_[announce_info.fullname_hash].emplace(announce_info.source_node_id, announce_info);
+          announces_[announce_info.track.fullname_hash].emplace(announce_info.track.source_node_id, announce_info);
 
         if (is_new) {
-            for (const auto& prefix_hash : PrefixHashNamespaceTuples(announce_info.name_space)) {
+            for (const auto& prefix_hash : PrefixHashNamespaceTuples(announce_info.track.name_space)) {
                 auto it = prefix_lookup_announces_.find(prefix_hash);
                 if (it == prefix_lookup_announces_.end()) {
-                    prefix_lookup_announces_.emplace(prefix_hash, std::set{ announce_info.fullname_hash });
+                    prefix_lookup_announces_.emplace(prefix_hash, std::set{ announce_info.track.fullname_hash });
                 } else {
                     auto& hash_set = it->second;
-                    if (auto s_it = hash_set.find(announce_info.fullname_hash); s_it == hash_set.end()) {
-                        hash_set.emplace(announce_info.fullname_hash);
+                    if (auto s_it = hash_set.find(announce_info.track.fullname_hash); s_it == hash_set.end()) {
+                        hash_set.emplace(announce_info.track.fullname_hash);
                     }
                 }
             }
@@ -188,23 +187,23 @@ namespace moq::peering {
         return is_new;
     }
 
-    bool InfoBase::RemoveAnnounce(const AnnounceInfo& announce_info)
+    bool ForwardingBase::RemoveAnnounce(const AnnounceInfo& announce_info)
     {
         bool removed{ false };
         std::lock_guard _(mutex_);
 
-        auto anno_it = announces_.find(announce_info.fullname_hash);
+        auto anno_it = announces_.find(announce_info.track.fullname_hash);
         if (anno_it != announces_.end()) {
             std::vector<uint64_t> remove_prefix_hashes;
 
-            for (const auto& prefix_hash : PrefixHashNamespaceTuples(announce_info.name_space)) {
+            for (const auto& prefix_hash : PrefixHashNamespaceTuples(announce_info.track.name_space)) {
                 const auto prefix_lookup_it = prefix_lookup_announces_.find(prefix_hash);
                 if (prefix_lookup_it == prefix_lookup_announces_.end()) {
                     continue;
                 }
 
                 // remove announce full hash name from each prefix tuple set
-                if (auto s_it = prefix_lookup_it->second.find(announce_info.fullname_hash);
+                if (auto s_it = prefix_lookup_it->second.find(announce_info.track.fullname_hash);
                     s_it != prefix_lookup_it->second.end()) {
                     prefix_lookup_it->second.erase(s_it);
                     removed = true;
@@ -220,7 +219,7 @@ namespace moq::peering {
                 prefix_lookup_announces_.erase(prefix_hash);
             }
 
-            anno_it->second.erase(announce_info.source_node_id);
+            anno_it->second.erase(announce_info.track.source_node_id);
 
             if (anno_it->second.empty()) {
                 announces_.erase(anno_it);
@@ -230,9 +229,9 @@ namespace moq::peering {
         return removed;
     }
 
-    std::set<NodeIdValueType> InfoBase::GetAnnounceIds(NameSpace name_space,
-                                                       std::vector<uint8_t> name,
-                                                       bool exact)
+    std::set<NodeIdValueType> ForwardingBase::GetAnnounceIds(NameSpace name_space,
+                                                             std::vector<uint8_t> name,
+                                                             bool exact)
     {
         std::set<NodeIdValueType> announces_ids;
         std::lock_guard _(mutex_);
@@ -267,7 +266,7 @@ namespace moq::peering {
         return announces_ids;
     }
 
-    std::weak_ptr<PeerSession> InfoBase::GetBestPeerSession(NodeIdValueType node_id)
+    std::weak_ptr<PeerSession> ForwardingBase::GetBestPeerSession(NodeIdValueType node_id)
     {
         std::lock_guard _(mutex_);
 
@@ -278,7 +277,7 @@ namespace moq::peering {
         return {};
     }
 
-    bool InfoBase::SelectBestNode(NodeIdValueType node_id)
+    bool ForwardingBase::SelectBestNode(NodeIdValueType node_id)
     {
         bool is_updated{ false };
 

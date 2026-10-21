@@ -297,4 +297,3 @@ namespace moq::peering {
         seed ^= value + 0x9e3779b9 + (seed << 6) + (value >> 2);
     }
 }
-

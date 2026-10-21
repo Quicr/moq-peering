@@ -55,7 +55,9 @@ namespace moq::peering {
             self->OnStream(stream_id, bidirectional, std::move(data), fin);
         };
         handlers.on_datagram = [self](std::vector<uint8_t> data) { self->OnDatagram(std::move(data)); };
-        handlers.on_stream_closed = [self](uint64_t stream_id, StreamClose how) { self->OnStreamClosed(stream_id, how); };
+        handlers.on_stream_closed = [self](uint64_t stream_id, StreamClose how) {
+            self->OnStreamClosed(stream_id, how);
+        };
         return handlers;
     }
 
@@ -331,8 +333,8 @@ namespace moq::peering {
             return;
         SPDLOG_LOGGER_DEBUG(LOGGER,
                             "Sending announce info id: {} source_node_id: {} withdraw: {}",
-                            announce_info.fullname_hash,
-                            announce_info.source_node_id,
+                            announce_info.track.fullname_hash,
+                            announce_info.track.source_node_id,
                             withdraw);
 
         SendControl(announce_info.Serialize(true, withdraw));
@@ -342,16 +344,16 @@ namespace moq::peering {
     {
         if (status_ != StatusValue::kConnected || !IsUsable())
             return;
-        SPDLOG_LOGGER_DEBUG(LOGGER,
-                            "Sending subscribe fullname: {} source_node_id: {} withdraw: {} priority: {} new_group: {}",
-                            subscribe_info.track_hash.track_fullname_hash,
-                            NodeId().Value(subscribe_info.source_node_id),
-                            withdraw,
-                            subscribe_info.priority,
-                            subscribe_info.new_group_request_id.has_value() ? *subscribe_info.new_group_request_id
-                                                                            : -1);
+        SPDLOG_LOGGER_DEBUG(
+          LOGGER,
+          "Sending subscribe fullname: {} source_node_id: {} withdraw: {} priority: {} new_group: {}",
+          subscribe_info.details.track_hash.track_fullname_hash,
+          NodeId().Value(subscribe_info.track.source_node_id),
+          withdraw,
+          subscribe_info.details.priority,
+          subscribe_info.details.new_group_request_id.has_value() ? *subscribe_info.details.new_group_request_id : -1);
 
-        SendControl(subscribe_info.Serialize(true, withdraw, node_info_.id == subscribe_info.source_node_id));
+        SendControl(subscribe_info.Serialize(true, withdraw, node_info_.id == subscribe_info.track.source_node_id));
     }
 
     void PeerSession::SendNodeInfo(const NodeInfo& node_info, bool withdraw) const
@@ -420,7 +422,7 @@ namespace moq::peering {
 
                         SendConnectOk();
 
-                        manager_.InfoBaseSyncPeer(*this);
+                        manager_.ForwardingBaseSyncPeer(*this);
                         break;
                     }
 
@@ -431,7 +433,7 @@ namespace moq::peering {
                             remote_node_info_ = *connect_resp.node_info;
                             manager_.NodeReceived(GetSessionId(), *connect_resp.node_info, false);
 
-                            manager_.InfoBaseSyncPeer(*this);
+                            manager_.ForwardingBaseSyncPeer(*this);
 
                         } else {
                             SPDLOG_LOGGER_DEBUG(config_.logger,
@@ -441,7 +443,7 @@ namespace moq::peering {
                         status_ = StatusValue::kConnected;
                         manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
 
-                        manager_.InfoBaseSyncPeer(*this);
+                        manager_.ForwardingBaseSyncPeer(*this);
                         break;
                     }
 

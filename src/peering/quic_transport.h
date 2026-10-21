@@ -112,10 +112,10 @@ namespace moq::peering {
                                                     AcceptFn on_accept);
 
         static std::shared_ptr<QuicConnection> Dial(const std::string& cert_file,
-                                                     const std::string& key_file,
-                                                     const std::string& host,
-                                                     uint16_t port,
-                                                     QuicConnection::Handlers handlers);
+                                                    const std::string& key_file,
+                                                    const std::string& host,
+                                                    uint16_t port,
+                                                    QuicConnection::Handlers handlers);
 
         void Shutdown();
         ~QuicEndpoint();

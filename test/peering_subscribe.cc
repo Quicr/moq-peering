@@ -12,22 +12,23 @@ namespace {
         using namespace moq::peering;
 
         SubscribeInfo subscribe_info;
-        subscribe_info.source_node_id = 0xff00aabbcc;
+        subscribe_info.track.source_node_id = 0xff00aabbcc;
 
         TrackHash track_hash;
         track_hash.track_name_hash = 0x9000;
         track_hash.track_namespace_hash = 0xaabbcc;
         track_hash.track_fullname_hash = 0x1234567;
-        subscribe_info.track_hash = track_hash;
+        subscribe_info.details.track_hash = track_hash;
+        subscribe_info.track.fullname_hash = track_hash.track_fullname_hash;
 
-        subscribe_info.name_space = NameSpace(std::string("namespace"));
-        subscribe_info.name = { 't', 'r', 'a', 'c', 'k' };
-        subscribe_info.priority = 10;
-        subscribe_info.delivery_timeout = 5000;
-        subscribe_info.expires = 1000;
-        subscribe_info.forward = 1;
+        subscribe_info.track.name_space = NameSpace(std::string("namespace"));
+        subscribe_info.track.name = { 't', 'r', 'a', 'c', 'k' };
+        subscribe_info.details.priority = 10;
+        subscribe_info.details.delivery_timeout = 5000;
+        subscribe_info.details.expires = 1000;
+        subscribe_info.details.forward = 1;
         if (with_new_group) {
-            subscribe_info.new_group_request_id = 42;
+            subscribe_info.details.new_group_request_id = 42;
         }
 
         return subscribe_info;
@@ -40,22 +41,24 @@ namespace {
         auto net_data = subscribe_info.Serialize(false, false, true);
 
         CHECK_EQ(net_data.size(), subscribe_info.SizeBytes());
-        CHECK_EQ(subscribe_info.seq, 1);
+        CHECK_EQ(subscribe_info.details.seq, 1);
 
         SubscribeInfo decoded_si(net_data);
 
-        CHECK_EQ(subscribe_info.seq, decoded_si.seq);
-        CHECK_EQ(subscribe_info.source_node_id, decoded_si.source_node_id);
-        CHECK_EQ(subscribe_info.track_hash.track_namespace_hash, decoded_si.track_hash.track_namespace_hash);
-        CHECK_EQ(subscribe_info.track_hash.track_name_hash, decoded_si.track_hash.track_name_hash);
-        CHECK_EQ(subscribe_info.track_hash.track_fullname_hash, decoded_si.track_hash.track_fullname_hash);
-        CHECK_EQ(subscribe_info.name_space, decoded_si.name_space);
-        CHECK_EQ(subscribe_info.name, decoded_si.name);
-        CHECK_EQ(subscribe_info.priority, decoded_si.priority);
-        CHECK_EQ(subscribe_info.delivery_timeout, decoded_si.delivery_timeout);
-        CHECK_EQ(subscribe_info.expires, decoded_si.expires);
-        CHECK_EQ(subscribe_info.forward, decoded_si.forward);
-        CHECK_EQ(subscribe_info.new_group_request_id, decoded_si.new_group_request_id);
+        CHECK_EQ(subscribe_info.details.seq, decoded_si.details.seq);
+        CHECK_EQ(subscribe_info.track.source_node_id, decoded_si.track.source_node_id);
+        CHECK_EQ(subscribe_info.details.track_hash.track_namespace_hash,
+                 decoded_si.details.track_hash.track_namespace_hash);
+        CHECK_EQ(subscribe_info.details.track_hash.track_name_hash, decoded_si.details.track_hash.track_name_hash);
+        CHECK_EQ(subscribe_info.details.track_hash.track_fullname_hash,
+                 decoded_si.details.track_hash.track_fullname_hash);
+        CHECK_EQ(subscribe_info.track.name_space, decoded_si.track.name_space);
+        CHECK_EQ(subscribe_info.track.name, decoded_si.track.name);
+        CHECK_EQ(subscribe_info.details.priority, decoded_si.details.priority);
+        CHECK_EQ(subscribe_info.details.delivery_timeout, decoded_si.details.delivery_timeout);
+        CHECK_EQ(subscribe_info.details.expires, decoded_si.details.expires);
+        CHECK_EQ(subscribe_info.details.forward, decoded_si.details.forward);
+        CHECK_EQ(subscribe_info.details.new_group_request_id, decoded_si.details.new_group_request_id);
     }
 }
 
@@ -69,7 +72,7 @@ TEST_CASE("Serialize Subscribe Info without new group request")
 {
     auto subscribe_info = MakeSubscribeInfo(false);
     CheckRoundTrip(subscribe_info);
-    CHECK_FALSE(subscribe_info.new_group_request_id.has_value());
+    CHECK_FALSE(subscribe_info.details.new_group_request_id.has_value());
 }
 
 TEST_CASE("Subscribe Info truncated input throws")

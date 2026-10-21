@@ -12,7 +12,7 @@
 #include <span>
 #include <thread>
 
-#include "info_base.h"
+#include "forwarding_base.h"
 #include "messages/data_header.h"
 #include "peer_session.h"
 #include "quic_transport.h"
@@ -69,7 +69,7 @@ namespace moq::peering {
 
         bool HasSubscribers(uint64_t track_fullname_hash) const;
 
-        void InfoBaseSyncPeer(PeerSession& peer_session);
+        void ForwardingBaseSyncPeer(PeerSession& peer_session);
         void SnsReceived(PeerSession& peer_session, const SubscribeNodeSet& sns, bool withdraw = false);
 
         void CloseStream(PeerSessionId peer_session_id,
@@ -78,7 +78,10 @@ namespace moq::peering {
                          uint64_t track_fullname_hash,
                          StreamClose flag);
 
-        void EndSubgroup(std::uint64_t track_full_name_hash, uint64_t group_id, uint64_t subgroup_id, bool reset = false);
+        void EndSubgroup(std::uint64_t track_full_name_hash,
+                         uint64_t group_id,
+                         uint64_t subgroup_id,
+                         bool reset = false);
 
         void SendData(std::uint64_t track_full_name_hash,
                       uint8_t priority,
@@ -98,13 +101,13 @@ namespace moq::peering {
         void PropagateNodeInfo(PeerSessionId peer_session_id, const NodeInfo& node_info, bool withdraw = false);
         std::shared_ptr<PeerSession> GetPeerSession(PeerSessionId peer_session_id);
 
-        static void CloseFibStreams(InfoBase::FibEntry& entry);
+        static void CloseFibStreams(ForwardingBase::FibEntry& entry);
 
         Delegate* LoadDelegate() const { return delegate_.load(std::memory_order_acquire); }
 
         bool stop_{ false };
         std::mutex mutex_;
-        std::shared_ptr<InfoBase> info_base_;
+        std::shared_ptr<ForwardingBase> info_base_;
         std::atomic<Delegate*> delegate_{ nullptr };
         Config config_;
         NodeInfo node_info_;

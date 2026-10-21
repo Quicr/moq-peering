@@ -6,16 +6,14 @@
 #include <picoquic_bbr.h>
 #include <picosocks.h>
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <random>
 #include <stdexcept>
 
-extern "C" void picoquic_init_transport_parameters(picoquic_tp_t* tp);
+extern "C" void
+picoquic_init_transport_parameters(picoquic_tp_t* tp);
 
 namespace moq::peering {
     namespace {
@@ -242,8 +240,8 @@ namespace moq::peering {
                     if (bytes != nullptr && length > 0) {
                         data.assign(bytes, bytes + length);
                     }
-                    handlers.on_stream(stream_id, IsBidirectional(stream_id), std::move(data),
-                                       event == picoquic_callback_stream_fin);
+                    handlers.on_stream(
+                      stream_id, IsBidirectional(stream_id), std::move(data), event == picoquic_callback_stream_fin);
                 }
                 if (event == picoquic_callback_stream_fin && handlers.on_stream_closed) {
                     handlers.on_stream_closed(stream_id, StreamClose::kFin);
@@ -285,7 +283,11 @@ namespace moq::peering {
         return 0;
     }
 
-    QuicEndpoint::QuicEndpoint(std::string cert_file, std::string key_file, uint16_t port, bool server, AcceptFn on_accept)
+    QuicEndpoint::QuicEndpoint(std::string cert_file,
+                               std::string key_file,
+                               uint16_t port,
+                               bool server,
+                               AcceptFn on_accept)
       : cert_file_(std::move(cert_file))
       , key_file_(std::move(key_file))
       , port_(port)
@@ -485,10 +487,7 @@ namespace moq::peering {
         return 0;
     }
 
-    int QuicEndpoint::LoopCallback(picoquic_quic_t*,
-                                   picoquic_packet_loop_cb_enum cb_mode,
-                                   void* callback_ctx,
-                                   void*)
+    int QuicEndpoint::LoopCallback(picoquic_quic_t*, picoquic_packet_loop_cb_enum cb_mode, void* callback_ctx, void*)
     {
         auto* endpoint = static_cast<QuicEndpoint*>(callback_ctx);
         if (endpoint == nullptr) {

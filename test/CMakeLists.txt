@@ -5,6 +5,15 @@ if(NOT TARGET doctest::doctest)
     CPMAddPackage("gh:doctest/doctest@2.4.11")
 endif()
 
+# CPM puts the CMake helper next to the fetched sources. A parent build that
+# already provided doctest exposes the same tree through the include directory.
+if(NOT DEFINED doctest_SOURCE_DIR)
+    get_target_property(_doctest_include doctest::doctest INTERFACE_INCLUDE_DIRECTORIES)
+    list(GET _doctest_include 0 _doctest_include)
+    get_filename_component(doctest_SOURCE_DIR "${_doctest_include}" DIRECTORY)
+endif()
+include("${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake")
+
 add_executable(moq_peering_test
     main.cc
     peering_node.cc
@@ -23,5 +32,4 @@ set_target_properties(moq_peering_test PROPERTIES
     CXX_EXTENSIONS OFF
 )
 
-enable_testing()
-add_test(NAME moq_peering_test COMMAND moq_peering_test)
+doctest_discover_tests(moq_peering_test)

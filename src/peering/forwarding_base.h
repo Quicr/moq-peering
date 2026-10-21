@@ -7,9 +7,9 @@
 #include "peer_session.h"
 #include "peering/messages/subscribe_info.h"
 
+#include "quic_transport.h"
 #include <functional>
 #include <map>
-#include "quic_transport.h"
 
 #include <set>
 #include <unordered_map>
@@ -20,11 +20,11 @@ namespace moq::peering {
      * @brief Forwarding information base
      * @details Computed subscribe and announcements are added and maintained
      */
-    class InfoBase
+    class ForwardingBase
     {
       public:
-        InfoBase() = default;
-        virtual ~InfoBase() = default;
+        ForwardingBase() = default;
+        virtual ~ForwardingBase() = default;
 
         /**
          * @brief Add or update node in the info base
@@ -109,9 +109,7 @@ namespace moq::peering {
          *
          * @returns a set of announce source node Ids
          */
-        std::set<NodeIdValueType> GetAnnounceIds(NameSpace name_space,
-                                                 std::vector<uint8_t> name,
-                                                 bool exact);
+        std::set<NodeIdValueType> GetAnnounceIds(NameSpace name_space, std::vector<uint8_t> name, bool exact);
 
         /**
          * @brief Gets the best peer session for given node id

@@ -6,13 +6,13 @@
 #include <optional>
 #include <set>
 
-#include <moq/peering/types.h>
 #include "messages/announce_info.h"
 #include "messages/data_header.h"
 #include "messages/node_info.h"
 #include "messages/subscribe_info.h"
 #include "messages/subscribe_node_set.h"
 #include "quic_transport.h"
+#include <moq/peering/types.h>
 
 namespace moq::peering {
 

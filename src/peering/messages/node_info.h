@@ -102,11 +102,21 @@ namespace moq::peering {
      * @details Encoding expects this struct to be fixed size, do not use variable length fields
      *      In other words, this will be memcpy upon serialization and deserialization
      */
+#if defined(_MSC_VER)
+#pragma pack(push, 1)
+#define MOQ_PEERING_PACKED_ATTR
+#else
+#define MOQ_PEERING_PACKED_ATTR __attribute__((__packed__, aligned(1)))
+#endif
     struct NodePathItem
     {
         NodeIdValueType id;    ///< Id of the node that received the node info
         uint64_t srtt_us{ 0 }; ///< SRTT in microseconds of the peer session that received the node info
-    } __attribute__((__packed__, aligned(1)));
+    } MOQ_PEERING_PACKED_ATTR;
+#if defined(_MSC_VER)
+#pragma pack(pop)
+#endif
+#undef MOQ_PEERING_PACKED_ATTR
 
     /**
      * @brief NodeInfo within the relay network

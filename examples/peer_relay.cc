@@ -120,7 +120,8 @@ namespace {
 
 } // namespace
 
-int main(int argc, char** argv)
+int
+main(int argc, char** argv)
 {
     if (argc != 3) {
         std::cerr << "usage: peer_relay <cert> <key>\n";
@@ -139,34 +140,34 @@ int main(int argc, char** argv)
     auto subscriber_config = MakeConfig("1:2", 33441, { { "127.0.0.1", 33440 } }, cert, key);
 
     try {
-    PeerManager publisher_node(publisher_config);
-    Publisher publisher(publisher_node);
-    publisher_node.SetDelegate(&publisher);
-    publisher_node.Announce(track, Announcement::kTrack);
+        PeerManager publisher_node(publisher_config);
+        Publisher publisher(publisher_node);
+        publisher_node.SetDelegate(&publisher);
+        publisher_node.Announce(track, Announcement::kTrack);
 
-    PeerManager subscriber_node(subscriber_config);
-    Subscriber subscriber;
-    subscriber_node.SetDelegate(&subscriber);
+        PeerManager subscriber_node(subscriber_config);
+        Subscriber subscriber;
+        subscriber_node.SetDelegate(&subscriber);
 
-    SubscribeParams params;
-    params.priority = 10;
-    params.delivery_timeout_ms = 1000;
-    params.forward = 1;
-    subscriber_node.Subscribe(track, params);
+        SubscribeParams params;
+        params.priority = 10;
+        params.delivery_timeout_ms = 1000;
+        params.forward = 1;
+        subscriber_node.Subscribe(track, params);
 
-    if (!subscriber.Wait(std::chrono::seconds(5))) {
-        std::cerr << "timed out waiting for the peered object\n";
+        if (!subscriber.Wait(std::chrono::seconds(5))) {
+            std::cerr << "timed out waiting for the peered object\n";
+            publisher_node.SetDelegate(nullptr);
+            subscriber_node.SetDelegate(nullptr);
+            return 1;
+        }
+
+        const auto payload = subscriber.payload();
+        std::cout << "received " << payload.size() << " bytes\n";
+
         publisher_node.SetDelegate(nullptr);
         subscriber_node.SetDelegate(nullptr);
-        return 1;
-    }
-
-    const auto payload = subscriber.payload();
-    std::cout << "received " << payload.size() << " bytes\n";
-
-    publisher_node.SetDelegate(nullptr);
-    subscriber_node.SetDelegate(nullptr);
-    return payload == std::vector<uint8_t>{ 'p', 'e', 'e', 'r' } ? 0 : 1;
+        return payload == std::vector<uint8_t>{ 'p', 'e', 'e', 'r' } ? 0 : 1;
     } catch (const std::exception& ex) {
         std::cerr << "peering example failed: " << ex.what() << '\n';
         return 1;

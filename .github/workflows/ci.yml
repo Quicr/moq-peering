@@ -1,0 +1,88 @@
+# Build and test on every push and pull request.
+name: Build and test
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.name == 'Ubuntu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config libssl-dev
+
+      - name: Install dependencies (macOS)
+        if: matrix.name == 'macOS'
+        run: brew install ninja openssl@3
+
+      - name: Install OpenSSL (Windows)
+        if: matrix.name == 'Windows'
+        run: vcpkg install openssl:x64-windows
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(-S . -B build -DMOQ_PEERING_BUILD_TESTS=ON -DMOQ_PEERING_BUILD_EXAMPLES=ON)
+          case "${{ matrix.name }}" in
+            Ubuntu)
+              args+=(-G Ninja -DCMAKE_BUILD_TYPE=Release)
+              ;;
+            macOS)
+              args+=(-G Ninja -DCMAKE_BUILD_TYPE=Release "-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)")
+              ;;
+            Windows)
+              args+=(
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake"
+                -DVCPKG_TARGET_TRIPLET=x64-windows
+              )
+              ;;
+          esac
+          cmake "${args[@]}"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.name }}" == "Windows" ]]; then
+            cmake --build build --config Release --parallel
+          else
+            cmake --build build --parallel
+          fi
+
+      - name: Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.name }}" == "Windows" ]]; then
+            ctest --test-dir build -C Release --output-on-failure
+          else
+            ctest --test-dir build --output-on-failure
+          fi
