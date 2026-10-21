@@ -123,8 +123,6 @@ namespace moq::peering {
     {
         connection_ = connection;
         connection_->SetHandlers(Handlers());
-        status_ = StatusValue::kConnected;
-        manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
     }
 
     SubscribeNodeSetId PeerSession::NextSnsId()
@@ -415,10 +413,13 @@ namespace moq::peering {
                                             static_cast<int>(version));
                         remote_node_info_ = connect.node_info;
 
+                        const bool became_connected = status_ != StatusValue::kConnected;
                         status_ = StatusValue::kConnected;
 
                         manager_.NodeReceived(GetSessionId(), connect.node_info, false);
-                        manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
+                        if (became_connected) {
+                            manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
+                        }
 
                         SendConnectOk();
 
@@ -440,8 +441,11 @@ namespace moq::peering {
                                                 "Connect error response from error: {}",
                                                 static_cast<int>(connect_resp.error));
                         }
+                        const bool became_connected = status_ != StatusValue::kConnected;
                         status_ = StatusValue::kConnected;
-                        manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
+                        if (became_connected) {
+                            manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
+                        }
 
                         manager_.ForwardingBaseSyncPeer(*this);
                         break;
@@ -578,9 +582,11 @@ namespace moq::peering {
         metrics_.srtt_us = connection_ ? connection_->RttUs() : 0;
 
         if (is_inbound_) {
-            status_ = StatusValue::kConnected;
             SPDLOG_LOGGER_DEBUG(LOGGER, "Peer conn_id {0} is ready", conn_id);
-            manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
+            if (status_ != StatusValue::kConnected) {
+                status_ = StatusValue::kConnected;
+                manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
+            }
             return;
         }
 

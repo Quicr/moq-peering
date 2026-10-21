@@ -57,6 +57,28 @@ if(NOT TARGET picoquic-core)
             "BUILD_PQBENCH OFF"
             "PICOQUIC_FETCH_PTLS ON"
     )
+    # picotls.h includes wincompat.h. That header lives in the Visual Studio
+    # tree, which the CMake build does not put on the include path. gettimeofday
+    # is implemented next to it. The picotls test programs are not part of this
+    # library and fail the same way, so leave them out of the default build.
+    if(WIN32 AND TARGET picotls-core)
+        get_target_property(_picotls_src picotls-core SOURCE_DIR)
+        set(_picotls_win "${_picotls_src}/picotlsvs/picotls")
+        if(EXISTS "${_picotls_win}/wincompat.h")
+            get_property(_picotls_targets DIRECTORY "${_picotls_src}" PROPERTY BUILDSYSTEM_TARGETS)
+            foreach(_picotls_tgt IN LISTS _picotls_targets)
+                target_include_directories(${_picotls_tgt} PUBLIC "${_picotls_win}")
+                get_target_property(_picotls_type ${_picotls_tgt} TYPE)
+                if(_picotls_type STREQUAL "EXECUTABLE")
+                    set_target_properties(${_picotls_tgt} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+                endif()
+            endforeach()
+            target_sources(picotls-core PRIVATE "${_picotls_win}/wintimeofday.c")
+            if(TARGET picotls-minicrypto)
+                target_link_libraries(picotls-minicrypto PUBLIC bcrypt)
+            endif()
+        endif()
+    endif()
 endif()
 
 if(NOT TARGET spdlog::spdlog)

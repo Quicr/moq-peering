@@ -1201,16 +1201,24 @@ namespace moq::peering {
 
                 std::vector<PeerSessionId> remove_peer_sess;
                 for (auto& [id, sess] : client_peer_sessions_) {
-                    if (sess->Status() == PeerSession::StatusValue::kDisconnected) {
-                        SPDLOG_LOGGER_INFO(LOGGER, "Peer session {} disconnected, reconnecting", sess->GetSessionId());
-                        sess->Connect();
-                        if (sess->GetSessionId() != 0 && sess->GetSessionId() != id) {
-                            auto reconnected = sess;
-                            client_peer_sessions_.try_emplace(reconnected->GetSessionId(), reconnected);
-                            reconnected->Begin();
-                            remove_peer_sess.push_back(id);
-                        }
+                    if (sess->Status() != PeerSession::StatusValue::kDisconnected) {
+                        continue;
                     }
+
+                    // Each dial uses a new endpoint, so the new connection id is often the same
+                    // as the one already in the map. Start the connection either way.
+                    SPDLOG_LOGGER_INFO(LOGGER, "Peer session {} disconnected, reconnecting", id);
+                    sess->Connect();
+                    const auto new_id = sess->GetSessionId();
+                    if (new_id == 0) {
+                        continue;
+                    }
+
+                    if (new_id != id) {
+                        client_peer_sessions_.try_emplace(new_id, sess);
+                        remove_peer_sess.push_back(id);
+                    }
+                    sess->Begin();
                 }
 
                 for (const auto id : remove_peer_sess) {
