@@ -35,9 +35,13 @@ jobs:
         if: inputs.platform == 'macOS'
         run: brew install ninja openssl@3
 
-      - name: Install OpenSSL (Windows)
+      - name: Install dependencies (Windows)
         if: inputs.platform == 'Windows'
-        run: vcpkg install openssl:x64-windows
+        run: |
+          vcpkg install openssl:x64-windows
+          # picotls calls find_package(PkgConfig REQUIRED) before it looks for
+          # optional libraries such as brotli. The Windows runner has no pkg-config.
+          choco install pkgconfiglite -y
 
       - name: Configure
         shell: bash

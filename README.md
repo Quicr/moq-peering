@@ -4,9 +4,12 @@
 [![MacOS](https://img.shields.io/github/actions/workflow/status/Quicr/moq-peering/macos.yml?branch=main&label=MacOS)](https://github.com/Quicr/moq-peering/actions/workflows/macos.yml)
 [![Windows](https://img.shields.io/github/actions/workflow/status/Quicr/moq-peering/windows.yml?branch=main&label=Windows)](https://github.com/Quicr/moq-peering/actions/workflows/windows.yml)
 
-Relay-to-relay peering. The library implements the peering protocol over QUIC and does not implement MoQ.
-An application such as LAPS implements MoQ and uses this library to forward names, subscribes, and objects
-between relays.
+C++ library for Media Over QUIC peering. Relays use it to peer with each other over QUIC and forward track names, subscribes, and objects. The library implements the peering protocol. It does not implement Media Over QUIC (MoQ). An application such as [LAPS](https://github.com/Quicr/laps) implements MoQ and uses this library.
+
+## Documentation
+
+- [API](docs/api.md) — `PeerManager`, `Delegate`, and examples
+- [Peering protocol](docs/relay-protocol.md) — relay-to-relay wire protocol for Media Over QUIC peering
 
 ## API
 

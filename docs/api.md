@@ -1,6 +1,6 @@
 # Peering library API
 
-`moq-peering` is a C++ library. An application such as LAPS implements MoQ and calls this API to forward names, subscribes, and objects between relays. The library speaks the peering protocol over QUIC. It does not open a MoQ session.
+`moq-peering` is a C++ library for Media Over QUIC peering. An application such as LAPS implements MoQ and calls this API to forward names, subscribes, and objects between relays. The library speaks the peering protocol over QUIC. It does not open a MoQ session.
 
 The public headers are:
 

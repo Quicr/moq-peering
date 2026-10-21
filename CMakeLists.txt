@@ -7,7 +7,7 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
 project(moq-peering
         VERSION 0.1.0
-        DESCRIPTION "Relay-to-relay peering protocol"
+        DESCRIPTION "C++ library for Media Over QUIC (MoQ) relay peering"
         LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
