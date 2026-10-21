@@ -1,8 +1,8 @@
 # moq-peering
 
-[![Ubuntu](https://github.com/Quicr/moq-peering/actions/workflows/ubuntu.yml/badge.svg?branch=main)](https://github.com/Quicr/moq-peering/actions/workflows/ubuntu.yml)
-[![macOS](https://github.com/Quicr/moq-peering/actions/workflows/macos.yml/badge.svg?branch=main)](https://github.com/Quicr/moq-peering/actions/workflows/macos.yml)
-[![Windows](https://github.com/Quicr/moq-peering/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/Quicr/moq-peering/actions/workflows/windows.yml)
+[![Ubuntu](https://img.shields.io/github/actions/workflow/status/Quicr/moq-peering/ubuntu.yml?branch=main&label=Ubuntu)](https://github.com/Quicr/moq-peering/actions/workflows/ubuntu.yml)
+[![MacOS](https://img.shields.io/github/actions/workflow/status/Quicr/moq-peering/macos.yml?branch=main&label=MacOS)](https://github.com/Quicr/moq-peering/actions/workflows/macos.yml)
+[![Windows](https://img.shields.io/github/actions/workflow/status/Quicr/moq-peering/windows.yml?branch=main&label=Windows)](https://github.com/Quicr/moq-peering/actions/workflows/windows.yml)
 
 Relay-to-relay peering. The library implements the peering protocol over QUIC and does not implement MoQ.
 An application such as LAPS implements MoQ and uses this library to forward names, subscribes, and objects
