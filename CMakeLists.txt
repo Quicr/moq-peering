@@ -70,7 +70,7 @@ if(NOT TARGET picoquic-core)
                 get_target_property(_picotls_type ${_picotls_tgt} TYPE)
                 # picotls adds a custom target named check. Include directories apply only to libraries and programs.
                 if(_picotls_type STREQUAL "UTILITY" OR _picotls_type STREQUAL "INTERFACE_LIBRARY")
-                    continue
+                    continue()
                 endif()
                 target_include_directories(${_picotls_tgt} PUBLIC "${_picotls_win}")
                 if(_picotls_type STREQUAL "EXECUTABLE")
