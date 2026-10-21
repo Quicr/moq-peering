@@ -1,0 +1,19 @@
+name: macOS
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    uses: ./.github/workflows/build-test.yml
+    with:
+      os: macos-latest
+      platform: macOS
