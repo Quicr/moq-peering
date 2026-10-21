@@ -67,8 +67,12 @@ if(NOT TARGET picoquic-core)
         if(EXISTS "${_picotls_win}/wincompat.h")
             get_property(_picotls_targets DIRECTORY "${_picotls_src}" PROPERTY BUILDSYSTEM_TARGETS)
             foreach(_picotls_tgt IN LISTS _picotls_targets)
-                target_include_directories(${_picotls_tgt} PUBLIC "${_picotls_win}")
                 get_target_property(_picotls_type ${_picotls_tgt} TYPE)
+                # picotls adds a custom target named check. Include directories apply only to libraries and programs.
+                if(_picotls_type STREQUAL "UTILITY" OR _picotls_type STREQUAL "INTERFACE_LIBRARY")
+                    continue
+                endif()
+                target_include_directories(${_picotls_tgt} PUBLIC "${_picotls_win}")
                 if(_picotls_type STREQUAL "EXECUTABLE")
                     set_target_properties(${_picotls_tgt} PROPERTIES EXCLUDE_FROM_ALL TRUE)
                 endif()
