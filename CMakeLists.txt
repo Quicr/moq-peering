@@ -72,7 +72,9 @@ if(NOT TARGET picoquic-core)
                 if(_picotls_type STREQUAL "UTILITY" OR _picotls_type STREQUAL "INTERFACE_LIBRARY")
                     continue()
                 endif()
-                target_include_directories(${_picotls_tgt} PUBLIC "${_picotls_win}")
+                # The compat headers live under the build tree. BUILD_INTERFACE keeps
+                # them on the compile line without exporting that path.
+                target_include_directories(${_picotls_tgt} PUBLIC "$<BUILD_INTERFACE:${_picotls_win}>")
                 if(_picotls_type STREQUAL "EXECUTABLE")
                     set_target_properties(${_picotls_tgt} PROPERTIES EXCLUDE_FROM_ALL TRUE)
                 endif()
