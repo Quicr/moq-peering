@@ -38,7 +38,7 @@ jobs:
       - name: Install dependencies (Windows)
         if: inputs.platform == 'Windows'
         run: |
-          vcpkg install openssl:x64-windows
+          vcpkg install openssl:x64-windows-release --overlay-triplets="${{ github.workspace }}/cmake/triplets"
           # picotls calls find_package(PkgConfig REQUIRED) before it looks for
           # optional libraries such as brotli. The Windows runner has no pkg-config.
           choco install pkgconfiglite -y
@@ -58,7 +58,8 @@ jobs:
             Windows)
               args+=(
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake"
-                -DVCPKG_TARGET_TRIPLET=x64-windows
+                -DVCPKG_TARGET_TRIPLET=x64-windows-release
+                -DVCPKG_OVERLAY_TRIPLETS="${GITHUB_WORKSPACE}/cmake/triplets"
               )
               ;;
           esac
