@@ -5,6 +5,9 @@ if(NOT TARGET doctest::doctest)
     CPMAddPackage("gh:doctest/doctest@2.4.11")
 endif()
 
+# Integration tests mint a P-256 certificate in a temp directory. They do not embed key material.
+find_package(OpenSSL REQUIRED)
+
 # CPM puts the CMake helper next to the fetched sources. A parent build that
 # already provided doctest exposes the same tree through the include directory.
 if(NOT DEFINED doctest_SOURCE_DIR)
@@ -23,9 +26,10 @@ add_executable(moq_peering_test
     peering_sns.cc
     peering_data_header.cc
     peering_info_base.cc
+    peering_integration.cc
 )
 target_include_directories(moq_peering_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-target_link_libraries(moq_peering_test PRIVATE moq-peering doctest::doctest)
+target_link_libraries(moq_peering_test PRIVATE moq-peering doctest::doctest OpenSSL::Crypto)
 set_target_properties(moq_peering_test PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES

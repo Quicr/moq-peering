@@ -41,10 +41,10 @@ A standalone build fetches picoquic, and picoquic fetches picotls. OpenSSL is th
 ```sh
 cmake -S . -B build
 cmake --build build
-./build/examples/peer_relay /path/to/cert.pem /path/to/key.pem
+ctest --test-dir build --output-on-failure
 ```
 
-Pass certificate and key paths on the command line or in configuration. Do not embed that material in source.
+Pass certificate and key paths in configuration. Do not embed that material in source. The integration tests generate a short-lived certificate for the test process and delete it afterward.
 
 ## Lifetime and threads
 
@@ -433,7 +433,7 @@ class RelayApp : public moq::peering::Delegate {
 
 ## Two relays, one object
 
-This is the flow implemented by `examples/peer_relay.cc`. One process runs a publisher node and a subscriber node. The subscriber dials the publisher, subscribes, and the publisher answers with one datagram. No MoQ session is opened.
+This is the flow covered by `test/peering_integration.cc`. One process runs the relay nodes. They announce, subscribe, and exchange datagrams. No MoQ session is opened. The same file also covers a three-relay chain whose middle node is a via, and a stub that dials an edge while a second edge dials that same parent.
 
 ```cpp
 moq::peering::TrackName DemoTrack()
@@ -531,15 +531,16 @@ Sequence:
 4. The subscriber's subscribe is sent. The publisher's `OnPeerSubscribe` runs and calls `SendData`.
 5. The subscriber's `OnPeerData` receives `{ 'p', 'e', 'e', 'r' }`.
 
-Build and run the example with certificate and key files you have already checked:
+The integration cases live in `moq_peering_test`:
+
+- two edge relays peer and exchange a publish, a subscribe, and one datagram in each direction
+- three relays in a chain, the middle one a via, exchange publishes and subscribes in both directions
+- a stub dials an edge, a second edge dials that parent, and the stub and the far edge exchange publishes and subscribes
 
 ```sh
-cmake -S . -B build
-cmake --build build --target peer_relay
-./build/examples/peer_relay /path/to/cert.pem /path/to/key.pem
+cmake --build build --target moq_peering_test
+ctest --test-dir build -R "relays" --output-on-failure
 ```
-
-A successful run prints `received 4 bytes`.
 
 ## Errors
 

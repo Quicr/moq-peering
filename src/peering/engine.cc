@@ -116,6 +116,7 @@ namespace moq::peering {
 
     bool Engine::HasSubscribers(uint64_t track_fullname_hash) const
     {
+        std::lock_guard lock(info_base_->mutex_);
         for (auto it = info_base_->client_fib_.lower_bound({ track_fullname_hash, 0 });
              it != info_base_->client_fib_.end();
              ++it) {
@@ -140,6 +141,8 @@ namespace moq::peering {
           subscribe_info.details.track_hash.track_namespace_hash,
           NodeId().Value(subscribe_info.track.source_node_id),
           withdraw);
+
+        std::lock_guard ib_lock(info_base_->mutex_);
 
         std::shared_ptr<PeerSession> peer_session;
         if (auto server_it = server_peer_sessions_.find(peer_session_id); server_it != server_peer_sessions_.end()) {
@@ -337,7 +340,7 @@ namespace moq::peering {
                 std::vector<SubscribeInfo> remove_sub;
                 std::vector<std::pair<PeerSessionId, SubscribeInfo>> update_sub;
 
-                std::unique_lock<std::mutex> ib_lock(info_base_->mutex_);
+                std::unique_lock ib_lock(info_base_->mutex_);
                 for (const auto& subs : info_base_->subscribes_) {
                     auto sub_it = subs.second.find(remote_node_info.id);
                     if (sub_it != subs.second.end()) {
@@ -505,6 +508,7 @@ namespace moq::peering {
 
     void Engine::EndSubgroup(std::uint64_t track_full_name_hash, uint64_t group_id, uint64_t subgroup_id, bool reset)
     {
+        std::lock_guard lock(info_base_->mutex_);
         const auto key = SubgroupStreamKey(group_id, subgroup_id);
 
         for (auto it = info_base_->client_fib_.lower_bound({ track_full_name_hash, 0 });
@@ -544,6 +548,8 @@ namespace moq::peering {
                           uint64_t subgroup_id,
                           std::shared_ptr<const std::vector<uint8_t>> data)
     {
+        std::lock_guard lock(info_base_->mutex_);
+
         DataHeader data_header;
         data_header.type = type;
         data_header.priority = priority;
@@ -738,6 +744,7 @@ namespace moq::peering {
 
     void Engine::Announce(const TrackName& track_name, Announcement kind, bool withdraw)
     {
+        std::lock_guard lock(info_base_->mutex_);
         const auto track_full_name = ToFullName(track_name);
         const bool publish_namespace = kind == Announcement::kNamespace;
         AnnounceInfo ai;
@@ -899,8 +906,23 @@ namespace moq::peering {
         if (check_thr_.joinable())
             check_thr_.join();
 
+        // Callbacks keep a session alive and can run after the map releases it. Disconnect joins
+        // outbound packet loops first, while this engine is still intact for those callbacks.
+        std::vector<std::shared_ptr<PeerSession>> sessions;
+        sessions.reserve(client_peer_sessions_.size() + server_peer_sessions_.size());
+        for (const auto& [_, sess] : client_peer_sessions_) {
+            sessions.push_back(sess);
+        }
+        for (const auto& [_, sess] : server_peer_sessions_) {
+            sessions.push_back(sess);
+        }
+        for (const auto& sess : sessions) {
+            sess->Disconnect();
+        }
+
         client_peer_sessions_.clear();
         server_peer_sessions_.clear();
+        sessions.clear();
 
         if (server_endpoint_ != nullptr) {
             server_endpoint_->Shutdown();
@@ -915,6 +937,7 @@ namespace moq::peering {
         uint64_t update_ref = rand();
 
         std::lock_guard _(mutex_);
+        std::lock_guard ib_lock(info_base_->mutex_);
 
         if (withdraw) {
             auto it = info_base_->peer_fib_.find({ peer_session.GetSessionId(), sns.id });
@@ -1205,8 +1228,8 @@ namespace moq::peering {
                         continue;
                     }
 
-                    // Each dial uses a new endpoint, so the new connection id is often the same
-                    // as the one already in the map. Start the connection either way.
+                    // Reconnect replaces the endpoint, so the connection id changes.
+                    // Keep the session under the new id.
                     SPDLOG_LOGGER_INFO(LOGGER, "Peer session {} disconnected, reconnecting", id);
                     sess->Connect();
                     const auto new_id = sess->GetSessionId();
@@ -1307,11 +1330,13 @@ namespace moq::peering {
                              uint64_t track_fullname_hash,
                              StreamClose flag)
     {
+        // Engine mutex first, then the forwarding tables. SnsReceived uses that same order.
+        std::lock_guard engine_lock(mutex_);
+        std::lock_guard ib_lock(info_base_->mutex_);
+
         // Close all egress peer streams related to the ingress stream close
         auto it = info_base_->peer_fib_.find({ peer_session_id, sns });
         if (it != info_base_->peer_fib_.end()) {
-            std::lock_guard _(mutex_);
-
             for (auto& [out_peer_sess_id, entry] : it->second) {
                 if (out_peer_sess_id == 0) {
                     // Client manager

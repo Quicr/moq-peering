@@ -6,8 +6,10 @@
 #include <picoquic_bbr.h>
 #include <picosocks.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <random>
 #include <stdexcept>
@@ -23,6 +25,14 @@ namespace moq::peering {
         bool IsBidirectional(uint64_t stream_id)
         {
             return (stream_id & PICOQUIC_STREAM_ID_UNIDIR) == 0;
+        }
+
+        // One counter for every endpoint. A relay that dials and accepts otherwise numbers both
+        // connections from 1, and the engine treats that number as the session id.
+        std::uint64_t NextConnectionId()
+        {
+            static std::atomic<std::uint64_t> next{ 1 };
+            return next.fetch_add(1, std::memory_order_relaxed);
         }
 
         void ApplyTransportParameters(picoquic_quic_t* quic)
@@ -139,25 +149,40 @@ namespace moq::peering {
         return stream;
     }
 
+    void QuicConnection::Dispatch(std::function<void()> fn)
+    {
+        if (!endpoint_ || !endpoint_->active_) {
+            return;
+        }
+        if (endpoint_->OnNetworkThread()) {
+            fn();
+            return;
+        }
+        endpoint_->Post(std::move(fn));
+    }
+
     void QuicConnection::Send(uint64_t stream_id, std::span<const uint8_t> data, bool fin)
     {
         std::vector<uint8_t> bytes(data.begin(), data.end());
-        Run([this, stream_id, bytes = std::move(bytes), fin] {
-            if (cnx_ == nullptr || closing_) {
+        auto self = shared_from_this();
+        Dispatch([self, stream_id, bytes = std::move(bytes), fin] {
+            if (self->cnx_ == nullptr || self->closing_) {
                 return;
             }
-            picoquic_add_to_stream(cnx_, stream_id, bytes.empty() ? nullptr : bytes.data(), bytes.size(), fin ? 1 : 0);
+            picoquic_add_to_stream(
+              self->cnx_, stream_id, bytes.empty() ? nullptr : bytes.data(), bytes.size(), fin ? 1 : 0);
         });
     }
 
     void QuicConnection::SendDatagram(std::span<const uint8_t> data)
     {
         std::vector<uint8_t> bytes(data.begin(), data.end());
-        Run([this, bytes = std::move(bytes)] {
-            if (cnx_ == nullptr || closing_ || bytes.empty()) {
+        auto self = shared_from_this();
+        Dispatch([self, bytes = std::move(bytes)] {
+            if (self->cnx_ == nullptr || self->closing_ || bytes.empty()) {
                 return;
             }
-            picoquic_queue_datagram_frame(cnx_, bytes.size(), bytes.data());
+            picoquic_queue_datagram_frame(self->cnx_, bytes.size(), bytes.data());
         });
     }
 
@@ -202,6 +227,14 @@ namespace moq::peering {
         if (endpoint_) {
             endpoint_->Release(id_);
         }
+    }
+
+    void QuicConnection::StopEndpoint()
+    {
+        if (!endpoint_) {
+            return;
+        }
+        endpoint_->Shutdown();
     }
 
     int QuicConnection::Callback(picoquic_cnx_t*,
@@ -454,7 +487,7 @@ namespace moq::peering {
                     return nullptr;
                 }
             }
-            connection = std::shared_ptr<QuicConnection>(new QuicConnection(shared_from_this(), cnx, next_id_++));
+            connection = std::shared_ptr<QuicConnection>(new QuicConnection(shared_from_this(), cnx, NextConnectionId()));
             connections_.emplace_back(connection->Id(), connection);
         }
 
@@ -533,7 +566,7 @@ namespace moq::peering {
                 return;
             }
 
-            connection = std::shared_ptr<QuicConnection>(new QuicConnection(endpoint, cnx, endpoint->next_id_++));
+            connection = std::shared_ptr<QuicConnection>(new QuicConnection(endpoint, cnx, NextConnectionId()));
             {
                 std::lock_guard lock(endpoint->connections_mutex_);
                 endpoint->connections_.emplace_back(connection->Id(), connection);

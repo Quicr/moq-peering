@@ -34,12 +34,12 @@ Standalone. CMake fetches picoquic, and picoquic fetches picotls. OpenSSL is req
 ```sh
 cmake -S . -B build
 cmake --build build
-./build/examples/peer_relay /path/to/cert.pem /path/to/key.pem
+ctest --test-dir build --output-on-failure
 ```
 
-`peer_relay` runs two relays in one process and forwards a single datagram. It does not open a MoQ session.
-Certificate and key paths are arguments. Check the certificate before using it (expiration, key size,
-signature algorithm, and whether a self-signed certificate is intentional).
+`test/peering_integration.cc` runs relays in one process. Two edges exchange a publish, a subscribe, and a datagram in each direction. A second case puts a via between two edges. A third case attaches a stub to an edge and exchanges with a far edge through that parent. None of them open a MoQ session.
+
+Those tests generate a short-lived self-signed P-256 certificate, check that it is currently valid and signed with SHA-256, and delete the key when the test ends. Do not embed certificate or key material in source.
 
 From LAPS, the library is added with CPM. A checkout at `../moq-peering` is used when it is present.
 Otherwise CPM fetches `quicr/moq-peering`.

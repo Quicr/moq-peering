@@ -68,6 +68,8 @@ namespace moq::peering {
         void Reset(uint64_t stream_id);
         void StopSending(uint64_t stream_id);
         void Close();
+        // Join this connection's packet loop. Client dials own the loop; the server loop is shared.
+        void StopEndpoint();
         void Start();
 
       private:
@@ -85,6 +87,9 @@ namespace moq::peering {
 
         int OnEvent(uint64_t stream_id, uint8_t* bytes, size_t length, picoquic_call_back_event_t event);
         void Run(std::function<void()> fn);
+        // Runs inline on this connection's network thread. Otherwise queues the work and returns.
+        // Waiting here deadlocks when two relays forward to each other from their QUIC callbacks.
+        void Dispatch(std::function<void()> fn);
 
         std::shared_ptr<QuicEndpoint> endpoint_;
         picoquic_cnx_t* cnx_{ nullptr };
@@ -162,7 +167,6 @@ namespace moq::peering {
         std::vector<std::function<void()>> queue_;
         std::mutex connections_mutex_;
         std::vector<std::pair<uint64_t, std::shared_ptr<QuicConnection>>> connections_;
-        uint64_t next_id_{ 1 };
     };
 
 } // namespace moq::peering

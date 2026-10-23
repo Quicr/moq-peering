@@ -54,6 +54,9 @@ namespace moq::peering {
 
         StatusValue Status();
 
+        /// Close the QUIC connection. Outbound sessions also stop their packet loop.
+        void Disconnect();
+
         /// Inbound only. The connection was accepted by the server endpoint.
         void SetConnection(std::shared_ptr<QuicConnection> connection);
 

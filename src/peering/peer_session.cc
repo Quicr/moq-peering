@@ -36,13 +36,24 @@ namespace moq::peering {
 
     PeerSession::~PeerSession()
     {
-        if (connection_) {
-            connection_->SetHandlers({});
-            connection_->Close();
-            connection_.reset();
+        Disconnect();
+        SPDLOG_LOGGER_DEBUG(LOGGER, "Removing peer session with {0}:{1}", peer_host_, peer_port_);
+    }
+
+    void PeerSession::Disconnect()
+    {
+        auto connection = std::move(connection_);
+        if (!connection) {
+            return;
         }
 
-        SPDLOG_LOGGER_DEBUG(LOGGER, "Removing peer session with {0}:{1}", peer_host_, peer_port_);
+        connection->SetHandlers({});
+        connection->Close();
+        // A dial owns its packet loop. Stop it before this session, and the engine it calls, go away.
+        // Accepted sessions share the server loop, which the engine stops after every session is closed.
+        if (!is_inbound_) {
+            connection->StopEndpoint();
+        }
     }
 
     QuicConnection::Handlers PeerSession::Handlers()

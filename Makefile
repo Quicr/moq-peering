@@ -30,7 +30,7 @@ all: build
 build-prep: CMakeLists.txt
 	cmake -S . -B${BUILD_DIR} -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DMOQ_PEERING_BUILD_TESTS=ON -DMOQ_PEERING_BUILD_EXAMPLES=ON
 
-## build: Build the library, tests, and example
+## build: Build the library and tests
 build: build-prep
 	cmake --build ${BUILD_DIR} -j ${BUILD_JOBS}
 

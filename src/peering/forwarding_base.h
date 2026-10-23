@@ -10,6 +10,7 @@
 #include "quic_transport.h"
 #include <functional>
 #include <map>
+#include <mutex>
 
 #include <set>
 #include <unordered_map>
@@ -244,7 +245,9 @@ namespace moq::peering {
          *   on peer disconnect/cleanup.
          */
         std::map<PeerSessionId, std::set<NodeIdValueType>> nodes_by_peer_session_;
-        std::mutex mutex_;
+        // Recursive so a callback on the network thread can re-enter while a forwarding update holds it.
+        // Two relays on one node run on different QUIC threads and both update these tables.
+        mutable std::recursive_mutex mutex_;
 
       private:
         static std::vector<std::size_t> PrefixHashNamespaceTuples(const NameSpace& name_space);
