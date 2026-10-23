@@ -20,6 +20,7 @@ Everything below is in namespace `moq::peering`. The wire format is described in
 - [Objects](#objects)
 - [Delegate](#delegate)
 - [Two relays, one object](#two-relays-one-object)
+- [Examples](#examples)
 - [Errors](#errors)
 - [Certificates and keys](#certificates-and-keys)
 
@@ -66,7 +67,7 @@ peers.SetDelegate(nullptr);
 
 Call `SetDelegate(nullptr)` before the delegate is destroyed. A callback that has already started may still finish, so destroy the `PeerManager` before the delegate object. A practical order is: clear the delegate, destroy the manager, then destroy the delegate.
 
-`PeerManager` methods are called from the application thread. `Delegate` methods run on peering threads. The bundled example calls `SendData` from `OnPeerSubscribe`; that is the pattern for publishing an object in response to a remote subscribe. Protect any state the callback shares with other threads. Do not destroy the manager or the delegate from inside a callback.
+`PeerManager` methods are called from the application thread. `Delegate` methods run on peering threads. `examples/producer.cc` calls `SendData` from `OnPeerSubscribe` and keeps sending while a subscriber remains. Protect any state the callback shares with other threads. Do not destroy the manager or the delegate from inside a callback.
 
 Announcements and subscribes made before a session is up are stored and sent when that session finishes its handshake.
 
@@ -541,6 +542,14 @@ The integration cases live in `moq_peering_test`:
 cmake --build build --target moq_peering_test
 ctest --test-dir build -R "relays" --output-on-failure
 ```
+
+## Examples
+
+[examples.md](examples.md) is the guide for the three binaries and a walkthrough of the API calls each one makes.
+
+`moq_peering_relay` forwards announces, subscribes, and objects. `--type` selects `edge`, `via`, or `stub`. `moq_peering_producer` dials a relay as a stub, announces one track, and calls `SendData` from `OnPeerSubscribe`. `moq_peering_subscriber` dials a relay as a stub, calls `Subscribe`, and prints bytes from `OnPeerData`.
+
+Pass certificate and key paths. `make cert` writes a development pair under `build/`. The programs read that pair from disk. They reject an expired, not-yet-valid, weak, or MD5/SHA-1 certificate. A self-signed P-256 certificate signed with SHA-256 is reported and accepted for these local examples.
 
 ## Errors
 

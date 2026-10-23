@@ -8,7 +8,8 @@ C++ library for Media Over QUIC peering. Relays use it to peer with each other o
 
 ## Documentation
 
-- [API](docs/api.md) — `PeerManager`, `Delegate`, and examples
+- [API](docs/api.md) — `PeerManager`, `Delegate`, and the calls an application makes
+- [Examples](docs/examples.md) — `moq_peering_relay`, `moq_peering_producer`, and `moq_peering_subscriber`, and how each one uses the API
 - [Peering protocol](docs/relay-protocol.md) — relay-to-relay wire protocol for Media Over QUIC peering
 
 ## API
@@ -43,3 +44,17 @@ Those tests generate a short-lived self-signed P-256 certificate, check that it 
 
 From LAPS, the library is added with CPM. A checkout at `../moq-peering` is used when it is present.
 Otherwise CPM fetches `quicr/moq-peering`.
+
+## Examples
+
+[docs/examples.md](docs/examples.md) documents each binary, its flags, and the `PeerManager` calls it makes. The short form is one edge with a producer and a subscriber:
+
+```sh
+make cert
+cmake --build build --target moq_peering_relay moq_peering_producer moq_peering_subscriber
+./build/examples/moq_peering_relay --cert build/server-cert.pem --key build/server-key.pem --listen 33434
+./build/examples/moq_peering_producer --cert build/server-cert.pem --key build/server-key.pem --peer 127.0.0.1:33434
+./build/examples/moq_peering_subscriber --cert build/server-cert.pem --key build/server-key.pem --peer 127.0.0.1:33434
+```
+
+`make cert` writes a self-signed P-256 certificate signed with SHA-256 under `build/`. The examples read those files, check validity, key strength, and signature, and accept the self-signed pair for local use. Certificate bytes stay out of source.
