@@ -66,7 +66,7 @@ peers.SetDelegate(nullptr);
 
 Call `SetDelegate(nullptr)` before the delegate is destroyed. A callback that has already started may still finish, so destroy the `PeerManager` before the delegate object. A practical order is: clear the delegate, destroy the manager, then destroy the delegate.
 
-`PeerManager` methods are called from the application thread. `Delegate` methods run on peering threads. The bundled example calls `SendData` from `OnSubscribe`; that is the pattern for publishing an object in response to a remote subscribe. Protect any state the callback shares with other threads. Do not destroy the manager or the delegate from inside a callback.
+`PeerManager` methods are called from the application thread. `Delegate` methods run on peering threads. The bundled example calls `SendData` from `OnPeerSubscribe`; that is the pattern for publishing an object in response to a remote subscribe. Protect any state the callback shares with other threads. Do not destroy the manager or the delegate from inside a callback.
 
 Announcements and subscribes made before a session is up are stored and sent when that session finishes its handshake.
 
@@ -185,9 +185,9 @@ peers.Withdraw(camera, moq::peering::Announcement::kTrack);
 
 Use the same `Announcement` value on withdraw that was used on the original announce.
 
-When this node announces, every remote subscribe whose namespace is a prefix of the announced namespace (or the other way around) is reported again through `Delegate::OnSubscribe`. Tuple hashes are compared in order. A shorter namespace matches when every tuple it has equals the other namespace.
+When this node announces, every remote subscribe whose namespace is a prefix of the announced namespace (or the other way around) is reported again through `Delegate::OnPeerSubscribe`. Tuple hashes are compared in order. A shorter namespace matches when every tuple it has equals the other namespace.
 
-Peers learn the announcement through `Delegate::OnTrack` or `Delegate::OnNamespace`.
+Peers learn the announcement through `Delegate::OnPeerTrack` or `Delegate::OnPeerNamespace`.
 
 ## Subscribes
 
@@ -223,7 +223,7 @@ params.forward = 1;
 peers.Subscribe(camera, params);
 ```
 
-`Subscribe` records interest for this node and advertises it to current peers. Later sessions receive it during handshake sync. The local delegate is not called for a subscribe this node originates. The peer that can publish the name receives `Delegate::OnSubscribe`.
+`Subscribe` records interest for this node and advertises it to current peers. Later sessions receive it during handshake sync. The local delegate is not called for a subscribe this node originates. The peer that can publish the name receives `Delegate::OnPeerSubscribe`.
 
 Call `Subscribe` once per track. Change parameters with `UpdateSubscribe`. `UpdateSubscribe` does nothing when this node has no subscribe for that name.
 
@@ -324,7 +324,7 @@ Reset a subgroup the receiver should discard:
 peers.EndSubgroup(track_hash, kGroup, kSubgroup, /*reset=*/true);
 ```
 
-The subscriber receives payload bytes in `Delegate::OnData`. For a datagram, `is_new_stream` is false and `stream_id` is empty. For a stream object, `stream_id` is set and `is_new_stream` is true on the first object of that QUIC stream. `OnPeerStreamClosed` follows when the peer closes that stream. `reset` is true when the peer reset it.
+The subscriber receives payload bytes in `Delegate::OnPeerData`. For a datagram, `is_new_stream` is false and `stream_id` is empty. For a stream object, `stream_id` is set and `is_new_stream` is true on the first object of that QUIC stream. `OnPeerStreamClosed` follows when the peer closes that stream. `reset` is true when the peer reset it.
 
 ## Delegate
 
@@ -333,16 +333,16 @@ class Delegate {
   public:
     virtual ~Delegate() = default;
 
-    virtual void OnSubscribe(const TrackName& name,
+    virtual void OnPeerSubscribe(const TrackName& name,
                              std::uint64_t track_hash,
                              const SubscribeParams& params);
 
-    virtual void OnUnsubscribe(std::uint64_t track_hash, bool subscribers_remain);
+    virtual void OnPeerUnsubscribe(std::uint64_t track_hash, bool subscribers_remain);
 
-    virtual void OnNamespace(const std::vector<std::vector<uint8_t>>& name_space, bool withdrawn);
-    virtual void OnTrack(const TrackName& name, bool withdrawn);
+    virtual void OnPeerNamespace(const std::vector<std::vector<uint8_t>>& name_space, bool withdrawn);
+    virtual void OnPeerTrack(const TrackName& name, bool withdrawn);
 
-    virtual void OnData(std::uint64_t track_hash,
+    virtual void OnPeerData(std::uint64_t track_hash,
                         bool is_new_stream,
                         std::optional<std::uint64_t> stream_id,
                         std::shared_ptr<const std::vector<uint8_t>> data);
@@ -360,16 +360,16 @@ Every method has an empty default. Override the ones the application handles.
 
 | Callback | When it runs |
 | --- | --- |
-| `OnSubscribe` | A peer subscribed to `name`. `track_hash` is the value to pass to `SendData` and `HasSubscribers`. Also runs when a local announce matches a subscribe already known. |
-| `OnUnsubscribe` | That peered subscribe was withdrawn. `subscribers_remain` is true when some other peer still wants the track. |
-| `OnNamespace` | A peer announced or withdrew a namespace. `withdrawn` is true on withdraw. |
-| `OnTrack` | A peer announced or withdrew one track. |
-| `OnData` | Object bytes for a name this node subscribed to. |
+| `OnPeerSubscribe` | A peer subscribed to `name`. `track_hash` is the value to pass to `SendData` and `HasSubscribers`. Also runs when a local announce matches a subscribe already known. |
+| `OnPeerUnsubscribe` | That peered subscribe was withdrawn. `subscribers_remain` is true when some other peer still wants the track. |
+| `OnPeerNamespace` | A peer announced or withdrew a namespace. `withdrawn` is true on withdraw. |
+| `OnPeerTrack` | A peer announced or withdrew one track. |
+| `OnPeerData` | Object bytes for a name this node subscribed to. |
 | `OnPeerStreamClosed` | The peer closed the stream that carried objects for `track_hash`. |
 | `OnPeerUp` | An outbound or accepted session finished its handshake. `session_id` identifies that QUIC connection. |
 | `OnPeerDown` | That session disconnected. Subscriptions learned only through it are withdrawn. |
 
-`OnData` is delivered only for a full-name hash this node has subscribed to.
+`OnPeerData` is delivered only for a full-name hash this node has subscribed to.
 
 ```cpp
 class RelayApp : public moq::peering::Delegate {
@@ -379,7 +379,7 @@ class RelayApp : public moq::peering::Delegate {
     {
     }
 
-    void OnSubscribe(const moq::peering::TrackName&,
+    void OnPeerSubscribe(const moq::peering::TrackName&,
                      std::uint64_t track_hash,
                      const moq::peering::SubscribeParams& params) override
     {
@@ -397,14 +397,14 @@ class RelayApp : public moq::peering::Delegate {
                         std::move(payload));
     }
 
-    void OnUnsubscribe(std::uint64_t track_hash, bool subscribers_remain) override
+    void OnPeerUnsubscribe(std::uint64_t track_hash, bool subscribers_remain) override
     {
         if (!subscribers_remain) {
             stop_publishing(track_hash);
         }
     }
 
-    void OnData(std::uint64_t track_hash,
+    void OnPeerData(std::uint64_t track_hash,
                 bool is_new_stream,
                 std::optional<std::uint64_t> stream_id,
                 std::shared_ptr<const std::vector<uint8_t>> data) override
@@ -454,7 +454,7 @@ class Publisher : public moq::peering::Delegate {
     {
     }
 
-    void OnSubscribe(const moq::peering::TrackName&,
+    void OnPeerSubscribe(const moq::peering::TrackName&,
                      std::uint64_t track_hash,
                      const moq::peering::SubscribeParams&) override
     {
@@ -505,7 +505,7 @@ void Run(const std::string& cert, const std::string& key)
     publisher_node.Announce(track, moq::peering::Announcement::kTrack);
 
     moq::peering::PeerManager subscriber_node(SubscriberConfig(cert, key));
-    Subscriber subscriber; // implements OnData and waits for the four bytes
+    Subscriber subscriber; // implements OnPeerData and waits for the four bytes
     subscriber_node.SetDelegate(&subscriber);
 
     moq::peering::SubscribeParams params;
@@ -528,8 +528,8 @@ Sequence:
 1. The publisher listens on UDP `33440` and announces `demo/object`.
 2. The subscriber dials `127.0.0.1:33440`.
 3. After the handshake, each side calls `OnPeerUp`.
-4. The subscriber's subscribe is sent. The publisher's `OnSubscribe` runs and calls `SendData`.
-5. The subscriber's `OnData` receives `{ 'p', 'e', 'e', 'r' }`.
+4. The subscriber's subscribe is sent. The publisher's `OnPeerSubscribe` runs and calls `SendData`.
+5. The subscriber's `OnPeerData` receives `{ 'p', 'e', 'e', 'r' }`.
 
 Build and run the example with certificate and key files you have already checked:
 
