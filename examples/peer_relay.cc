@@ -46,7 +46,7 @@ namespace {
         {
         }
 
-        void OnSubscribe(const TrackName&, std::uint64_t track_hash, const SubscribeParams&) override
+        void OnPeerSubscribe(const TrackName&, std::uint64_t track_hash, const SubscribeParams&) override
         {
             if (track_hash != track_hash_) {
                 return;
@@ -68,10 +68,10 @@ namespace {
     class Subscriber : public Delegate
     {
       public:
-        void OnData(std::uint64_t,
-                    bool,
-                    std::optional<std::uint64_t>,
-                    std::shared_ptr<const std::vector<uint8_t>> data) override
+        void OnPeerData(std::uint64_t,
+                        bool,
+                        std::optional<std::uint64_t>,
+                        std::shared_ptr<const std::vector<uint8_t>> data) override
         {
             {
                 std::lock_guard lock(mutex_);

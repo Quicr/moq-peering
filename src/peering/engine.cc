@@ -211,15 +211,15 @@ namespace moq::peering {
             }
 
             if (auto* delegate = LoadDelegate()) {
-                SPDLOG_LOGGER_INFO(LOGGER,
-                                   "Notifying delegate of subscribe fullname: {} new_group_request: {}",
-                                   subscribe_info.details.track_hash.track_fullname_hash,
-                                   subscribe_info.details.new_group_request_id.has_value()
-                                     ? static_cast<std::int64_t>(*subscribe_info.details.new_group_request_id)
-                                     : std::int64_t{ -1 });
-                delegate->OnSubscribe(ToTrackName(subscribe_info.track.name_space, subscribe_info.track.name),
-                                      subscribe_info.details.track_hash.track_fullname_hash,
-                                      ToParams(subscribe_info));
+                SPDLOG_LOGGER_DEBUG(LOGGER,
+                                    "Notifying delegate of subscribe fullname: {} new_group_request: {}",
+                                    subscribe_info.details.track_hash.track_fullname_hash,
+                                    subscribe_info.details.new_group_request_id.has_value()
+                                      ? static_cast<std::int64_t>(*subscribe_info.details.new_group_request_id)
+                                      : std::int64_t{ -1 });
+                delegate->OnPeerSubscribe(ToTrackName(subscribe_info.track.name_space, subscribe_info.track.name),
+                                          subscribe_info.details.track_hash.track_fullname_hash,
+                                          ToParams(subscribe_info));
             }
         } else {
             auto bp_it = info_base_->nodes_best_.find(subscribe_info.track.source_node_id);
@@ -249,8 +249,8 @@ namespace moq::peering {
             }
 
             if (auto* delegate = LoadDelegate()) {
-                delegate->OnUnsubscribe(subscribe_info.details.track_hash.track_fullname_hash,
-                                        HasSubscribers(subscribe_info.details.track_hash.track_fullname_hash));
+                delegate->OnPeerUnsubscribe(subscribe_info.details.track_hash.track_fullname_hash,
+                                            HasSubscribers(subscribe_info.details.track_hash.track_fullname_hash));
             }
         }
 
@@ -297,9 +297,9 @@ namespace moq::peering {
         if (auto* delegate = LoadDelegate()) {
             const auto name = ToTrackName(announce_info.track.name_space, announce_info.track.name);
             if (announce_info.details.flags & 1) {
-                delegate->OnNamespace(name.name_space, withdraw);
+                delegate->OnPeerNamespace(name.name_space, withdraw);
             } else {
-                delegate->OnTrack(name, withdraw);
+                delegate->OnPeerTrack(name, withdraw);
             }
         }
 
@@ -440,12 +440,12 @@ namespace moq::peering {
 
                     if (auto* delegate = LoadDelegate()) {
                         if (eflags.reliable) {
-                            delegate->OnData(si_it->second.details.track_hash.track_fullname_hash,
-                                             is_new_stream,
-                                             stream_id,
-                                             client_data);
+                            delegate->OnPeerData(si_it->second.details.track_hash.track_fullname_hash,
+                                                 is_new_stream,
+                                                 stream_id,
+                                                 client_data);
                         } else {
-                            delegate->OnData(
+                            delegate->OnPeerData(
                               si_it->second.details.track_hash.track_fullname_hash, false, std::nullopt, client_data);
                         }
                     }
@@ -840,9 +840,9 @@ namespace moq::peering {
                             SPDLOG_LOGGER_INFO(LOGGER,
                                                "Notifying delegate of subscribe fullname: {}",
                                                sub_info.details.track_hash.track_fullname_hash);
-                            delegate->OnSubscribe(ToTrackName(sub_info.track.name_space, sub_info.track.name),
-                                                  sub_info.details.track_hash.track_fullname_hash,
-                                                  ToParams(sub_info));
+                            delegate->OnPeerSubscribe(ToTrackName(sub_info.track.name_space, sub_info.track.name),
+                                                      sub_info.details.track_hash.track_fullname_hash,
+                                                      ToParams(sub_info));
                         }
                     }
                 }

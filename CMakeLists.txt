@@ -48,7 +48,7 @@ if(NOT TARGET picoquic-core)
     CPMAddPackage(
         NAME picoquic
         GITHUB_REPOSITORY private-octopus/picoquic
-        GIT_TAG poll-recvmmsg
+        GIT_TAG master
         OPTIONS
             "BUILD_DEMO OFF"
             "BUILD_HTTP OFF"

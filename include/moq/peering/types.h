@@ -108,7 +108,7 @@ namespace moq::peering {
         virtual ~Delegate() = default;
 
         /// A peer subscribed to this name. Subscribe locally if the application publishes it.
-        virtual void OnSubscribe(const TrackName& name, std::uint64_t track_hash, const SubscribeParams& params)
+        virtual void OnPeerSubscribe(const TrackName& name, std::uint64_t track_hash, const SubscribeParams& params)
         {
             (void)name;
             (void)track_hash;
@@ -121,31 +121,31 @@ namespace moq::peering {
          * @param track_hash           Full track name hash
          * @param subscribers_remain   True when some other peer still subscribes to the track
          */
-        virtual void OnUnsubscribe(std::uint64_t track_hash, bool subscribers_remain)
+        virtual void OnPeerUnsubscribe(std::uint64_t track_hash, bool subscribers_remain)
         {
             (void)track_hash;
             (void)subscribers_remain;
         }
 
         /// A peer announced or withdrew a namespace.
-        virtual void OnNamespace(const std::vector<std::vector<uint8_t>>& name_space, bool withdrawn)
+        virtual void OnPeerNamespace(const std::vector<std::vector<uint8_t>>& name_space, bool withdrawn)
         {
             (void)name_space;
             (void)withdrawn;
         }
 
         /// A peer announced or withdrew a track.
-        virtual void OnTrack(const TrackName& name, bool withdrawn)
+        virtual void OnPeerTrack(const TrackName& name, bool withdrawn)
         {
             (void)name;
             (void)withdrawn;
         }
 
         /// Object bytes from a peer for a name this node subscribed to.
-        virtual void OnData(std::uint64_t track_hash,
-                            bool is_new_stream,
-                            std::optional<std::uint64_t> stream_id,
-                            std::shared_ptr<const std::vector<uint8_t>> data)
+        virtual void OnPeerData(std::uint64_t track_hash,
+                                bool is_new_stream,
+                                std::optional<std::uint64_t> stream_id,
+                                std::shared_ptr<const std::vector<uint8_t>> data)
         {
             (void)track_hash;
             (void)is_new_stream;
