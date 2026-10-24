@@ -48,7 +48,7 @@ if(NOT TARGET picoquic-core)
     CPMAddPackage(
         NAME picoquic
         GITHUB_REPOSITORY private-octopus/picoquic
-        GIT_TAG master
+        GIT_TAG v2026.10.22.70b5fd5
         OPTIONS
             "BUILD_DEMO OFF"
             "BUILD_HTTP OFF"

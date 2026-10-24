@@ -341,33 +341,28 @@ namespace moq::peering {
                 std::vector<std::pair<PeerSessionId, SubscribeInfo>> update_sub;
 
                 std::unique_lock ib_lock(info_base_->mutex_);
-                for (const auto& subs : info_base_->subscribes_) {
-                    auto sub_it = subs.second.find(remote_node_info.id);
-                    if (sub_it != subs.second.end()) {
-                        remove_sub.emplace_back(sub_it->second);
-                    } else {
-                        /*
-                         * check if peer session was used as best path for subscription. If so, try to find another
-                         *      best path. If no best path can be found, remove subscribe info.
-                         */
-                        for (auto& [_, si] : subs.second) {
-                            auto cfib_it = info_base_->client_fib_.find(
-                              { si.details.track_hash.track_fullname_hash, peer_session_id });
-                            if (cfib_it != info_base_->client_fib_.end()) {
-                                info_base_->client_fib_.erase(cfib_it);
+                for (const auto& [_, by_source] : info_base_->subscribes_) {
+                    for (const auto& [source_id, si] : by_source) {
+                        if (source_id == remote_node_info.id) {
+                            remove_sub.emplace_back(si);
+                            continue;
+                        }
 
-                                ib_lock.unlock();
-                                auto best_peer = info_base_->GetBestPeerSession(si.track.source_node_id);
-                                ib_lock.lock();
+                        // This session may be the path toward the subscriber. Repath, or withdraw that subscribe.
+                        auto cfib_it = info_base_->client_fib_.find(
+                          { si.details.track_hash.track_fullname_hash, peer_session_id });
+                        if (cfib_it == info_base_->client_fib_.end()) {
+                            continue;
+                        }
 
-                                if (const auto& peer_sess = best_peer.lock()) {
-                                    // best path found, update entry to use new path
-                                    update_sub.emplace_back(peer_sess->GetSessionId(), si);
-                                } else {
-                                    // No best path found, remove
-                                    remove_sub.emplace_back(sub_it->second);
-                                }
-                            }
+                        info_base_->client_fib_.erase(cfib_it);
+
+                        // Same recursive mutex. Keep it held so `si` cannot be freed by another peering thread.
+                        const auto best_peer = info_base_->GetBestPeerSession(si.track.source_node_id);
+                        if (const auto peer_sess = best_peer.lock()) {
+                            update_sub.emplace_back(peer_sess->GetSessionId(), si);
+                        } else {
+                            remove_sub.emplace_back(si);
                         }
                     }
                 }

@@ -362,6 +362,18 @@ namespace {
             node_->Subscribe(name, params);
         }
 
+        int PeersDown()
+        {
+            std::lock_guard lock(app_.mu);
+            return app_.peers_down;
+        }
+
+        bool WaitPeersDown(int target, std::chrono::milliseconds timeout)
+        {
+            std::unique_lock lock(app_.mu);
+            return app_.cv.wait_for(lock, timeout, [&] { return app_.peers_down >= target; });
+        }
+
         bool WaitTrack(const TrackName& name, std::chrono::milliseconds timeout)
         {
             std::unique_lock lock(app_.mu);
@@ -409,6 +421,7 @@ namespace {
             std::mutex mu;
             std::condition_variable cv;
             int peers_up{ 0 };
+            int peers_down{ 0 };
             std::map<std::uint64_t, std::vector<uint8_t>> published;
             std::map<std::uint64_t, std::vector<uint8_t>> received;
             std::vector<TrackName> tracks;
@@ -429,6 +442,15 @@ namespace {
                 {
                     std::lock_guard lock(mu);
                     ++peers_up;
+                }
+                cv.notify_all();
+            }
+
+            void OnPeerDown(std::uint64_t) override
+            {
+                {
+                    std::lock_guard lock(mu);
+                    ++peers_down;
                 }
                 cv.notify_all();
             }
@@ -554,6 +576,33 @@ TEST_CASE("Three relays in a chain forward through a via")
     CHECK(via.SawSubscribe(left_hash));
     CHECK(via.SawSubscribe(right_hash));
     CHECK(via.PayloadCount() == 0);
+}
+
+TEST_CASE("Dropping the via relay does not crash the edges")
+{
+    // left <--dial-- via <--dial-- right, then the via goes away.
+    // Each edge still holds the other edge's subscribe, learned through the via. Tearing that
+    // session down must withdraw those subscribes without throwing.
+    const TestIdentity identity;
+
+    Relay left("edge-left", NodeType::kEdge, {}, identity);
+    auto via = std::make_unique<Relay>(
+      "via-mid",
+      NodeType::kVia,
+      std::vector<std::pair<std::string, uint16_t>>{ { "127.0.0.1", left.port() } },
+      identity);
+    Relay right("edge-right", NodeType::kEdge, { { "127.0.0.1", via->port() } }, identity);
+
+    const auto left_track = MakeTrack("edge-left", "object");
+    const auto right_track = MakeTrack("edge-right", "object");
+    Exchange(left, left_track, Bytes("from-left"), right, right_track, Bytes("from-right"));
+
+    const int left_down = left.PeersDown();
+    const int right_down = right.PeersDown();
+    via.reset();
+
+    REQUIRE_MESSAGE(left.WaitPeersDown(left_down + 1, kWait), "left did not observe the via disconnect");
+    REQUIRE_MESSAGE(right.WaitPeersDown(right_down + 1, kWait), "right did not observe the via disconnect");
 }
 
 TEST_CASE("Three relays with a stub exchange publish, subscribe, and data")
