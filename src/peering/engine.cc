@@ -411,88 +411,141 @@ namespace moq::peering {
                                  uint64_t data_offset,
                                  SendFlags eflags)
     {
-        std::unique_lock _(info_base_->mutex_); // TODO: See about removing this lock
-        auto it = info_base_->peer_fib_.find({ peer_session_id, data_header.sns_id });
-        if (it != info_base_->peer_fib_.end()) {
-            // TODO(tievens): Replace data_out with new transport multiple data
-            for (auto& [out_peer_sess_id, entry] : it->second) {
-                if (out_peer_sess_id == peer_session_id)
-                    continue; // Skip; don't send back to same peer or if it's self
+        // Opening a QUIC stream waits on that connection's packet thread. The forwarding lock cannot
+        // be held across that wait: the other thread takes the same lock from its own callback.
+        struct Step
+        {
+            bool to_delegate{ false };
+            std::uint64_t track_hash{ 0 };
+            std::shared_ptr<const std::vector<uint8_t>> client_data;
 
-                if (out_peer_sess_id == 0) { // self; Client manager is interested
-                    // TODO(tievens): Consider maintaining a client specific si map to avoid second map lookup
-                    const auto sub_it = info_base_->subscribes_.find(data_header.track_full_name_hash);
-                    if (sub_it == info_base_->subscribes_.end()) {
-                        continue;
-                    }
+            std::shared_ptr<PeerSession> session;
+            PeerSessionId egress_id{ 0 };
+            std::shared_ptr<QuicStream> stream;
+            bool open_stream{ false };
+            ForwardingBase::StreamKey key{};
+            std::shared_ptr<std::vector<uint8_t>> data;
+        };
 
-                    const auto& si_it = sub_it->second.find(node_info_.id);
-                    if (si_it == sub_it->second.end()) {
-                        continue;
-                    }
+        std::vector<Step> steps;
+        bool stash = false;
 
-                    auto client_data = data;
-                    if (data_offset != 0) {
-                        client_data = std::make_shared<std::vector<uint8_t>>(data->begin() + data_offset, data->end());
-                    }
+        {
+            std::lock_guard lock(info_base_->mutex_);
+            auto it = info_base_->peer_fib_.find({ peer_session_id, data_header.sns_id });
+            if (it == info_base_->peer_fib_.end()) {
+                stash = true;
+            } else {
+                // TODO(tievens): Replace data_out with new transport multiple data
+                for (auto& [out_peer_sess_id, entry] : it->second) {
+                    if (out_peer_sess_id == peer_session_id)
+                        continue; // Skip; don't send back to same peer or if it's self
 
-                    if (auto* delegate = LoadDelegate()) {
-                        if (eflags.reliable) {
-                            delegate->OnPeerData(si_it->second.details.track_hash.track_fullname_hash,
-                                                 is_new_stream,
-                                                 stream_id,
-                                                 client_data);
-                        } else {
-                            delegate->OnPeerData(
-                              si_it->second.details.track_hash.track_fullname_hash, false, std::nullopt, client_data);
-                        }
-                    }
-                    continue;
-                }
-
-                auto data_out = std::make_shared<std::vector<uint8_t>>(data->begin(), data->end());
-
-                // Update SNS_ID if new stream header included or if datagram (both have sns_id)
-                if (is_new_stream || eflags.reliable == false) {
-                    auto sns_id_bytes = BytesOf(entry.out_sns_id);
-                    std::copy(sns_id_bytes.rbegin(), sns_id_bytes.rend(), data_out->begin() + 2);
-                }
-
-                auto out_peer_sess = entry.peer_session.lock();
-                if (out_peer_sess == nullptr) {
-                    continue;
-                }
-
-                std::shared_ptr<QuicStream> out_stream;
-                if (eflags.reliable) {
-                    const auto key = IngressStreamKey(stream_id);
-                    auto sid_it = entry.streams.find(key);
-                    if (sid_it == entry.streams.end()) {
-
-                        if (!is_new_stream) {
-                            continue; // Ignore existing data and wait for start of new stream
-                        }
-
-                        out_stream = out_peer_sess->CreateStream(data_header.priority);
-                        if (out_stream == nullptr) {
+                    if (out_peer_sess_id == 0) { // self; Client manager is interested
+                        // TODO(tievens): Consider maintaining a client specific si map to avoid second map lookup
+                        const auto sub_it = info_base_->subscribes_.find(data_header.track_full_name_hash);
+                        if (sub_it == info_base_->subscribes_.end()) {
                             continue;
                         }
 
-                        const auto [inserted_it, inserted] = entry.streams.try_emplace(key, out_stream);
-                        if (!inserted) {
-                            out_peer_sess->CloseStream(out_stream, StreamClose::kReset);
-                            out_stream = inserted_it->second;
+                        const auto& si_it = sub_it->second.find(node_info_.id);
+                        if (si_it == sub_it->second.end()) {
+                            continue;
                         }
+
+                        Step step;
+                        step.to_delegate = true;
+                        step.track_hash = si_it->second.details.track_hash.track_fullname_hash;
+                        step.client_data = data;
+                        if (data_offset != 0) {
+                            step.client_data =
+                              std::make_shared<std::vector<uint8_t>>(data->begin() + data_offset, data->end());
+                        }
+                        steps.push_back(std::move(step));
+                        continue;
+                    }
+
+                    auto out_peer_sess = entry.peer_session.lock();
+                    if (out_peer_sess == nullptr) {
+                        continue;
+                    }
+
+                    Step step;
+                    step.session = std::move(out_peer_sess);
+                    step.egress_id = out_peer_sess_id;
+                    step.data = std::make_shared<std::vector<uint8_t>>(data->begin(), data->end());
+
+                    // Update SNS_ID if new stream header included or if datagram (both have sns_id)
+                    if (is_new_stream || eflags.reliable == false) {
+                        auto sns_id_bytes = BytesOf(entry.out_sns_id);
+                        std::copy(sns_id_bytes.rbegin(), sns_id_bytes.rend(), step.data->begin() + 2);
+                    }
+
+                    if (eflags.reliable) {
+                        step.key = IngressStreamKey(stream_id);
+                        auto sid_it = entry.streams.find(step.key);
+                        if (sid_it == entry.streams.end()) {
+                            if (!is_new_stream) {
+                                continue; // Ignore existing data and wait for start of new stream
+                            }
+                            step.open_stream = true;
+                        } else {
+                            step.stream = sid_it->second;
+                        }
+                    }
+
+                    steps.push_back(std::move(step));
+                }
+            }
+        }
+
+        if (stash) {
+            if (auto peer_sess = GetPeerSession(peer_session_id)) {
+                peer_sess->StashPending(PeerSession::PendingData{
+                  is_new_stream, stream_id, data_header, std::move(data), data_offset, eflags });
+            }
+            return;
+        }
+
+        for (auto& step : steps) {
+            if (step.to_delegate) {
+                if (auto* delegate = LoadDelegate()) {
+                    if (eflags.reliable) {
+                        delegate->OnPeerData(step.track_hash, is_new_stream, stream_id, step.client_data);
                     } else {
-                        out_stream = sid_it->second;
+                        delegate->OnPeerData(step.track_hash, false, std::nullopt, step.client_data);
                     }
                 }
-
-                out_peer_sess->SendData(data_header.priority, data_header.ttl, out_stream, eflags, std::move(data_out));
+                continue;
             }
-        } else if (auto peer_sess = GetPeerSession(peer_session_id)) {
-            peer_sess->StashPending(
-              PeerSession::PendingData{ is_new_stream, stream_id, data_header, std::move(data), data_offset, eflags });
+
+            if (step.open_stream) {
+                auto opened = step.session->CreateStream(data_header.priority);
+                std::shared_ptr<QuicStream> discard;
+                {
+                    std::lock_guard lock(info_base_->mutex_);
+                    const auto fib = info_base_->peer_fib_.find({ peer_session_id, data_header.sns_id });
+                    if (fib == info_base_->peer_fib_.end() || opened == nullptr) {
+                        discard = std::move(opened);
+                    } else if (const auto entry = fib->second.find(step.egress_id); entry == fib->second.end()) {
+                        discard = std::move(opened);
+                    } else {
+                        const auto [inserted_it, inserted] = entry->second.streams.try_emplace(step.key, opened);
+                        if (!inserted) {
+                            discard = std::move(opened);
+                        }
+                        step.stream = inserted_it->second;
+                    }
+                }
+                if (discard) {
+                    step.session->CloseStream(discard, StreamClose::kReset);
+                }
+                if (step.stream == nullptr) {
+                    continue;
+                }
+            }
+
+            step.session->SendData(data_header.priority, data_header.ttl, step.stream, eflags, std::move(step.data));
         }
     }
 
@@ -543,99 +596,135 @@ namespace moq::peering {
                           uint64_t subgroup_id,
                           std::shared_ptr<const std::vector<uint8_t>> data)
     {
-        std::lock_guard lock(info_base_->mutex_);
+        // Same rule as ForwardPeerData: CreateStream waits on the peer connection's packet thread.
+        struct Outgoing
+        {
+            std::shared_ptr<PeerSession> session;
+            PeerSessionId session_id{ 0 };
+            std::shared_ptr<QuicStream> stream;
+            bool open_stream{ false };
+            ForwardingBase::StreamKey key{};
+            std::shared_ptr<std::vector<uint8_t>> data;
+            SubscribeNodeSetId sns_id{ 0 };
+        };
 
-        DataHeader data_header;
-        data_header.type = type;
-        data_header.priority = priority;
-        data_header.ttl = ttl;
-        data_header.track_full_name_hash = track_full_name_hash;
-
-        auto net_data = std::make_shared<std::vector<uint8_t>>(data_header.Serialize());
-        net_data->insert(net_data->end(), data->begin(), data->end());
-
+        std::vector<Outgoing> outgoing;
         SendFlags eflags;
 
-        bool set_sns_id{ false };
-        switch (type) {
-            case DataType::kDatagram:
-                eflags.reliable = false;
-                set_sns_id = true;
-                break;
-            case DataType::kExistingStream:
-                eflags.reliable = true;
-                break;
-            case DataType::kNewStream:
-                set_sns_id = true;
-                eflags.reliable = true;
-                break;
-        }
+        {
+            std::lock_guard lock(info_base_->mutex_);
 
-        for (auto it = info_base_->client_fib_.lower_bound({ track_full_name_hash, 0 });
-             it != info_base_->client_fib_.end();
-             ++it) {
-            auto& fib_entry = it->second;
+            DataHeader data_header;
+            data_header.type = type;
+            data_header.priority = priority;
+            data_header.ttl = ttl;
+            data_header.track_full_name_hash = track_full_name_hash;
 
-            if (it->first.first != track_full_name_hash)
-                break;
+            auto net_data = std::make_shared<std::vector<uint8_t>>(data_header.Serialize());
+            net_data->insert(net_data->end(), data->begin(), data->end());
 
-            if (const auto peer_sess = fib_entry.peer_session.lock()) {
+            bool set_sns_id{ false };
+            switch (type) {
+                case DataType::kDatagram:
+                    eflags.reliable = false;
+                    set_sns_id = true;
+                    break;
+                case DataType::kExistingStream:
+                    eflags.reliable = true;
+                    break;
+                case DataType::kNewStream:
+                    set_sns_id = true;
+                    eflags.reliable = true;
+                    break;
+            }
+
+            for (auto it = info_base_->client_fib_.lower_bound({ track_full_name_hash, 0 });
+                 it != info_base_->client_fib_.end();
+                 ++it) {
+                auto& fib_entry = it->second;
+
+                if (it->first.first != track_full_name_hash)
+                    break;
+
+                const auto peer_sess = fib_entry.peer_session.lock();
+                if (!peer_sess) {
+                    continue;
+                }
+
                 SPDLOG_LOGGER_TRACE(LOGGER,
                                     "Data object send, peer_session: {} egress SNS_ID: {} tfn_hash: {}",
                                     peer_sess->GetSessionId(),
                                     fib_entry.out_sns_id,
                                     track_full_name_hash);
 
-                auto send_data = net_data;
+                Outgoing out;
+                out.session = peer_sess;
+                out.session_id = it->first.second;
+                out.sns_id = fib_entry.out_sns_id;
+                out.data = net_data;
                 if (set_sns_id) {
-                    send_data = std::make_shared<std::vector<uint8_t>>(*net_data);
+                    out.data = std::make_shared<std::vector<uint8_t>>(*net_data);
                     auto sns_id_bytes = BytesOf(fib_entry.out_sns_id);
-                    std::copy(sns_id_bytes.rbegin(), sns_id_bytes.rend(), send_data->begin() + 2);
+                    std::copy(sns_id_bytes.rbegin(), sns_id_bytes.rend(), out.data->begin() + 2);
                 }
 
-                std::shared_ptr<QuicStream> out_stream;
-
                 if (eflags.reliable) {
-                    const auto key = SubgroupStreamKey(group_id, subgroup_id);
-
-                    auto stream_it = fib_entry.streams.find(key);
+                    out.key = SubgroupStreamKey(group_id, subgroup_id);
+                    auto stream_it = fib_entry.streams.find(out.key);
                     if (stream_it == fib_entry.streams.end()) {
                         if (data_header.type != DataType::kNewStream) {
                             continue;
                         }
-
-                        out_stream = peer_sess->CreateStream(priority);
-                        if (out_stream == nullptr) {
+                        out.open_stream = true;
+                    } else {
+                        out.stream = stream_it->second;
+                        if (out.stream == nullptr) {
                             continue;
                         }
-
-                        const auto [inserted_it, inserted] = fib_entry.streams.try_emplace(key, out_stream);
-                        if (!inserted) {
-                            peer_sess->CloseStream(out_stream, StreamClose::kReset);
-                            out_stream = inserted_it->second;
-                        }
-                    } else {
-                        out_stream = stream_it->second;
                     }
-
-                    if (out_stream == nullptr) {
-                        continue;
-                    }
-
-                    SPDLOG_LOGGER_TRACE(LOGGER,
-                                        "Data object send, peer_session: {} egress SNS_ID: {} tfn_hash: {} "
-                                        "group_id: {} subgroup_id: {} streams: {} data len: {}",
-                                        peer_sess->GetSessionId(),
-                                        fib_entry.out_sns_id,
-                                        track_full_name_hash,
-                                        group_id,
-                                        subgroup_id,
-                                        fib_entry.streams.size(),
-                                        net_data->size());
                 }
 
-                peer_sess->SendData(priority, ttl, out_stream, eflags, send_data);
+                outgoing.push_back(std::move(out));
             }
+        }
+
+        for (auto& out : outgoing) {
+            if (out.open_stream) {
+                auto opened = out.session->CreateStream(priority);
+                std::shared_ptr<QuicStream> discard;
+                {
+                    std::lock_guard lock(info_base_->mutex_);
+                    const auto fib = info_base_->client_fib_.find({ track_full_name_hash, out.session_id });
+                    if (fib == info_base_->client_fib_.end() || opened == nullptr) {
+                        discard = std::move(opened);
+                    } else {
+                        const auto [inserted_it, inserted] = fib->second.streams.try_emplace(out.key, opened);
+                        if (!inserted) {
+                            discard = std::move(opened);
+                        }
+                        out.stream = inserted_it->second;
+
+                        SPDLOG_LOGGER_TRACE(LOGGER,
+                                            "Data object send, peer_session: {} egress SNS_ID: {} tfn_hash: {} "
+                                            "group_id: {} subgroup_id: {} streams: {} data len: {}",
+                                            out.session->GetSessionId(),
+                                            out.sns_id,
+                                            track_full_name_hash,
+                                            group_id,
+                                            subgroup_id,
+                                            fib->second.streams.size(),
+                                            out.data->size());
+                    }
+                }
+                if (discard) {
+                    out.session->CloseStream(discard, StreamClose::kReset);
+                }
+                if (out.stream == nullptr) {
+                    continue;
+                }
+            }
+
+            out.session->SendData(priority, ttl, out.stream, eflags, out.data);
         }
     }
 
@@ -931,8 +1020,8 @@ namespace moq::peering {
     {
         uint64_t update_ref = rand();
 
-        std::lock_guard _(mutex_);
-        std::lock_guard ib_lock(info_base_->mutex_);
+        std::unique_lock engine_lock(mutex_);
+        std::unique_lock ib_lock(info_base_->mutex_);
 
         if (withdraw) {
             auto it = info_base_->peer_fib_.find({ peer_session.GetSessionId(), sns.id });
@@ -1050,14 +1139,20 @@ namespace moq::peering {
         }
 
         // A datagram can pass the control stream. Replay anything that arrived before this SNS.
-        for (auto pending : peer_session.TakePending(sns.id)) {
+        // ForwardPeerData may wait on another connection's packet thread to open a stream, so both
+        // locks have to be released first. Holding them across that wait stalls the other thread.
+        auto pending = peer_session.TakePending(sns.id);
+        ib_lock.unlock();
+        engine_lock.unlock();
+
+        for (auto& item : pending) {
             ForwardPeerData(peer_session.GetSessionId(),
-                            pending.is_new_stream,
-                            pending.stream_id,
-                            pending.header,
-                            pending.data,
-                            pending.data_offset,
-                            pending.flags);
+                            item.is_new_stream,
+                            item.stream_id,
+                            item.header,
+                            item.data,
+                            item.data_offset,
+                            item.flags);
         }
     }
 

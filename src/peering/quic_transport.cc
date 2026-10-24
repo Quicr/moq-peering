@@ -188,18 +188,20 @@ namespace moq::peering {
 
     void QuicConnection::Reset(uint64_t stream_id)
     {
-        Run([this, stream_id] {
-            if (cnx_ != nullptr && !closing_) {
-                picoquic_reset_stream(cnx_, stream_id, 0);
+        auto self = shared_from_this();
+        Dispatch([self, stream_id] {
+            if (self->cnx_ != nullptr && !self->closing_) {
+                picoquic_reset_stream(self->cnx_, stream_id, 0);
             }
         });
     }
 
     void QuicConnection::StopSending(uint64_t stream_id)
     {
-        Run([this, stream_id] {
-            if (cnx_ != nullptr && !closing_) {
-                picoquic_stop_sending(cnx_, stream_id, 0);
+        auto self = shared_from_this();
+        Dispatch([self, stream_id] {
+            if (self->cnx_ != nullptr && !self->closing_) {
+                picoquic_stop_sending(self->cnx_, stream_id, 0);
             }
         });
     }
