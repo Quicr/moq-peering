@@ -612,12 +612,13 @@ TEST_CASE("Three relays with a stub exchange publish, subscribe, and data")
     const TestIdentity identity;
 
     Relay parent("edge-parent", NodeType::kEdge, {}, identity);
-    Relay far("edge-far", NodeType::kEdge, { { "127.0.0.1", parent.port() } }, identity);
+    // `far` is an empty macro in the Windows headers pulled in by winsock.
+    Relay far_edge("edge-far", NodeType::kEdge, { { "127.0.0.1", parent.port() } }, identity);
     Relay stub("stub", NodeType::kStub, { { "127.0.0.1", parent.port() } }, identity);
 
     const auto stub_track = MakeTrack("stub", "object");
     const auto far_track = MakeTrack("edge-far", "object");
-    Exchange(stub, stub_track, Bytes("from-stub"), far, far_track, Bytes("from-far"));
+    Exchange(stub, stub_track, Bytes("from-stub"), far_edge, far_track, Bytes("from-far"));
 
     const auto stub_hash = PeerManager::HashTrack(stub_track);
     const auto far_hash = PeerManager::HashTrack(far_track);
