@@ -155,6 +155,18 @@ namespace moq::peering {
             return;
         }
 
+        // A relay learns its own subscribe again when two sessions exist toward the next hop.
+        // Installing that echo as a forwarding entry makes HasSubscribers stay true after the
+        // local client leaves, so the upstream subscribe is never withdrawn and the publisher
+        // keeps sending to a peer.
+        if (subscribe_info.track.source_node_id == node_info_.id) {
+            SPDLOG_LOGGER_DEBUG(LOGGER,
+                                "Ignoring echoed subscribe fullname: {} withdraw: {}",
+                                subscribe_info.details.track_hash.track_fullname_hash,
+                                withdraw);
+            return;
+        }
+
         const auto is_updated =
           withdraw ? info_base_->RemoveSubscribe(subscribe_info) : info_base_->AddSubscribe(subscribe_info);
 
@@ -181,34 +193,38 @@ namespace moq::peering {
             const auto priority = subscribe_info.details.priority;
             auto bp_it = info_base_->nodes_best_.find(subscribe_info.track.source_node_id);
             if (bp_it != info_base_->nodes_best_.end()) {
-                const auto& peer_session = bp_it->second.lock();
-                SPDLOG_LOGGER_DEBUG(
-                  LOGGER,
-                  "Best peer session for subscribe fullname: {} source_node: {} is via peer_session_id: {}",
-                  subscribe_info.details.track_hash.track_fullname_hash,
-                  subscribe_info.track.source_node_id,
-                  peer_session->GetSessionId());
+                const auto best_session = bp_it->second.lock();
+                if (best_session) {
+                    SPDLOG_LOGGER_DEBUG(
+                      LOGGER,
+                      "Best peer session for subscribe fullname: {} source_node: {} is via peer_session_id: {}",
+                      subscribe_info.details.track_hash.track_fullname_hash,
+                      subscribe_info.track.source_node_id,
+                      best_session->GetSessionId());
 
-                if (auto [sns_id, is_new] =
-                      peer_session->AddSubscribeSourceNode(subscribe_info.details.track_hash.track_fullname_hash,
-                                                           subscribe_info.track.source_node_id,
-                                                           priority);
-                    is_new) {
-                    SPDLOG_LOGGER_INFO(LOGGER,
-                                       "New source added to peer session for subscribe fullname: {} source_node: {} is "
-                                       "via peer_session_id: {} sns_id: {}",
-                                       subscribe_info.details.track_hash.track_fullname_hash,
-                                       subscribe_info.track.source_node_id,
-                                       peer_session->GetSessionId(),
-                                       sns_id);
-
-                    if (auto [_, is_new] = info_base_->client_fib_.try_emplace(
-                          { subscribe_info.details.track_hash.track_fullname_hash, peer_session_id },
-                          ForwardingBase::FibEntry{ update_ref, {}, sns_id, bp_it->second });
+                    if (auto [sns_id, is_new] =
+                          best_session->AddSubscribeSourceNode(subscribe_info.details.track_hash.track_fullname_hash,
+                                                               subscribe_info.track.source_node_id,
+                                                               priority);
                         is_new) {
-                        SPDLOG_LOGGER_INFO(LOGGER,
-                                           "New subscribe fullname: {}, sending subscribe to client manager",
-                                           subscribe_info.details.track_hash.track_fullname_hash);
+                        SPDLOG_LOGGER_INFO(
+                          LOGGER,
+                          "New source added to peer session for subscribe fullname: {} source_node: {} is "
+                          "via peer_session_id: {} sns_id: {}",
+                          subscribe_info.details.track_hash.track_fullname_hash,
+                          subscribe_info.track.source_node_id,
+                          best_session->GetSessionId(),
+                          sns_id);
+
+                        // Key is the egress session. SendData uses that session, and withdraw removes it.
+                        if (auto [_, inserted] = info_base_->client_fib_.try_emplace(
+                              { subscribe_info.details.track_hash.track_fullname_hash, best_session->GetSessionId() },
+                              ForwardingBase::FibEntry{ update_ref, {}, sns_id, bp_it->second });
+                            inserted) {
+                            SPDLOG_LOGGER_INFO(LOGGER,
+                                               "New subscribe fullname: {}, sending subscribe to client manager",
+                                               subscribe_info.details.track_hash.track_fullname_hash);
+                        }
                     }
                 }
             }
@@ -225,35 +241,84 @@ namespace moq::peering {
                                           ToParams(subscribe_info));
             }
         } else {
-            auto bp_it = info_base_->nodes_best_.find(subscribe_info.track.source_node_id);
-            if (bp_it != info_base_->nodes_best_.end()) {
-                const auto& peer_session = bp_it->second.lock();
-                if (const auto [_, sns_removed] = peer_session->RemoveSubscribeSourceNode(
-                      subscribe_info.details.track_hash.track_fullname_hash, subscribe_info.track.source_node_id);
-                    sns_removed) {
-                    SPDLOG_LOGGER_INFO(LOGGER,
-                                       "No subscribe nodes left via peer session {}, removed subscribe fullname: {}",
-                                       peer_session->GetSessionId(),
-                                       subscribe_info.details.track_hash.track_fullname_hash);
+            const auto track_hash = subscribe_info.details.track_hash.track_fullname_hash;
+            const auto source_id = subscribe_info.track.source_node_id;
 
-                    const auto cfib_it = info_base_->client_fib_.find(
-                      { subscribe_info.details.track_hash.track_fullname_hash, peer_session_id });
-                    if (cfib_it != info_base_->client_fib_.end()) {
-                        CloseFibStreams(cfib_it->second);
-                        info_base_->client_fib_.erase(cfib_it);
+            // The SNS may sit on a session that is no longer nodes_best_. Drop the source everywhere
+            // so the next hop withdraws its peer forwarding entry and stops sending.
+            auto drop_source = [&](const std::shared_ptr<PeerSession>& session) {
+                if (!session) {
+                    return;
+                }
+
+                const auto [node_removed, sns_removed] = session->RemoveSubscribeSourceNode(track_hash, source_id);
+                if (!node_removed && !sns_removed) {
+                    return;
+                }
+
+                if (!sns_removed) {
+                    return;
+                }
+
+                SPDLOG_LOGGER_INFO(LOGGER,
+                                   "No subscribe nodes left via peer session {}, removed subscribe fullname: {}",
+                                   session->GetSessionId(),
+                                   track_hash);
+
+                for (auto fib_it = info_base_->client_fib_.lower_bound({ track_hash, 0 });
+                     fib_it != info_base_->client_fib_.end();) {
+                    if (fib_it->first.first != track_hash) {
+                        break;
                     }
 
-                    if (not HasSubscribers(subscribe_info.details.track_hash.track_fullname_hash)) {
-                        SPDLOG_LOGGER_INFO(LOGGER,
-                                           "No peers left for subscribe fullname: {}",
-                                           subscribe_info.details.track_hash.track_fullname_hash);
+                    const auto egress = fib_it->second.peer_session.lock();
+                    const bool same_session =
+                      fib_it->first.second == session->GetSessionId() ||
+                      (egress && egress->GetSessionId() == session->GetSessionId());
+                    if (!same_session) {
+                        ++fib_it;
+                        continue;
+                    }
+
+                    CloseFibStreams(fib_it->second);
+                    fib_it = info_base_->client_fib_.erase(fib_it);
+                }
+            };
+
+            for (const auto& [_, session] : client_peer_sessions_) {
+                drop_source(session);
+            }
+            for (const auto& [_, session] : server_peer_sessions_) {
+                drop_source(session);
+            }
+
+            bool remote_subscribers{ false };
+            if (const auto sub_it = info_base_->subscribes_.find(track_hash); sub_it != info_base_->subscribes_.end()) {
+                for (const auto& [id, _] : sub_it->second) {
+                    if (id != node_info_.id) {
+                        remote_subscribers = true;
+                        break;
                     }
                 }
             }
 
+            if (!remote_subscribers) {
+                for (auto fib_it = info_base_->client_fib_.lower_bound({ track_hash, 0 });
+                     fib_it != info_base_->client_fib_.end();) {
+                    if (fib_it->first.first != track_hash) {
+                        break;
+                    }
+                    CloseFibStreams(fib_it->second);
+                    fib_it = info_base_->client_fib_.erase(fib_it);
+                }
+
+                SPDLOG_LOGGER_INFO(LOGGER, "No peers left for subscribe fullname: {}", track_hash);
+            }
+
             if (auto* delegate = LoadDelegate()) {
-                delegate->OnPeerUnsubscribe(subscribe_info.details.track_hash.track_fullname_hash,
-                                            HasSubscribers(subscribe_info.details.track_hash.track_fullname_hash));
+                // A leftover fib is not a subscriber. The publisher stops when no remote node
+                // still wants the track.
+                delegate->OnPeerUnsubscribe(track_hash, remote_subscribers);
             }
         }
 
