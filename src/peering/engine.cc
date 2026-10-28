@@ -272,9 +272,8 @@ namespace moq::peering {
                     }
 
                     const auto egress = fib_it->second.peer_session.lock();
-                    const bool same_session =
-                      fib_it->first.second == session->GetSessionId() ||
-                      (egress && egress->GetSessionId() == session->GetSessionId());
+                    const bool same_session = fib_it->first.second == session->GetSessionId() ||
+                                              (egress && egress->GetSessionId() == session->GetSessionId());
                     if (!same_session) {
                         ++fib_it;
                         continue;
@@ -414,8 +413,8 @@ namespace moq::peering {
                         }
 
                         // This session may be the path toward the subscriber. Repath, or withdraw that subscribe.
-                        auto cfib_it = info_base_->client_fib_.find(
-                          { si.details.track_hash.track_fullname_hash, peer_session_id });
+                        auto cfib_it =
+                          info_base_->client_fib_.find({ si.details.track_hash.track_fullname_hash, peer_session_id });
                         if (cfib_it == info_base_->client_fib_.end()) {
                             continue;
                         }
@@ -1377,30 +1376,48 @@ namespace moq::peering {
             if (std::chrono::duration_cast<std::chrono::milliseconds>(check - start).count() >= interval_ms) {
                 start = std::chrono::system_clock::now();
 
-                std::vector<PeerSessionId> remove_peer_sess;
-                for (auto& [id, sess] : client_peer_sessions_) {
-                    if (sess->Status() != PeerSession::StatusValue::kDisconnected) {
-                        continue;
+                std::vector<std::shared_ptr<PeerSession>> reconnect;
+                {
+                    std::lock_guard lock(mutex_);
+                    for (const auto& [_, sess] : client_peer_sessions_) {
+                        if (sess && sess->Status() == PeerSession::StatusValue::kDisconnected) {
+                            reconnect.push_back(sess);
+                        }
                     }
+                }
 
+                struct Rekey
+                {
+                    PeerSessionId old_id{ 0 };
+                    PeerSessionId new_id{ 0 };
+                    std::shared_ptr<PeerSession> session;
+                };
+                std::vector<Rekey> rekey;
+                for (const auto& sess : reconnect) {
+                    const auto old_id = sess->GetSessionId();
                     // Reconnect replaces the endpoint, so the connection id changes.
-                    // Keep the session under the new id.
-                    SPDLOG_LOGGER_INFO(LOGGER, "Peer session {} disconnected, reconnecting", id);
+                    SPDLOG_LOGGER_INFO(LOGGER, "Peer session {} disconnected, reconnecting", old_id);
                     sess->Connect();
                     const auto new_id = sess->GetSessionId();
                     if (new_id == 0) {
                         continue;
                     }
-
-                    if (new_id != id) {
-                        client_peer_sessions_.try_emplace(new_id, sess);
-                        remove_peer_sess.push_back(id);
+                    if (new_id != old_id) {
+                        rekey.push_back(Rekey{ old_id, new_id, sess });
                     }
                     sess->Begin();
                 }
 
-                for (const auto id : remove_peer_sess) {
-                    client_peer_sessions_.erase(id);
+                if (!rekey.empty()) {
+                    std::lock_guard lock(mutex_);
+                    for (const auto& item : rekey) {
+                        const auto it = client_peer_sessions_.find(item.old_id);
+                        if (it == client_peer_sessions_.end() || it->second != item.session) {
+                            continue;
+                        }
+                        client_peer_sessions_.erase(it);
+                        client_peer_sessions_.try_emplace(item.new_id, item.session);
+                    }
                 }
             }
 
@@ -1436,6 +1453,41 @@ namespace moq::peering {
         }
 
         peer_sess->Attach(connection);
+    }
+
+    std::vector<PeerSnapshot> Engine::Peers()
+    {
+        std::vector<std::shared_ptr<PeerSession>> sessions;
+        {
+            std::lock_guard lock(mutex_);
+            sessions.reserve(server_peer_sessions_.size() + client_peer_sessions_.size());
+            for (const auto& [_, session] : server_peer_sessions_) {
+                if (session) {
+                    sessions.push_back(session);
+                }
+            }
+            for (const auto& [_, session] : client_peer_sessions_) {
+                if (session) {
+                    sessions.push_back(session);
+                }
+            }
+        }
+
+        // Count forwarding entries before Snapshot(). RttUs waits on the QUIC thread, which also
+        // takes the forwarding lock.
+        const auto forwarding = info_base_->ForwardingCountsBySession();
+
+        std::vector<PeerSnapshot> peers;
+        peers.reserve(sessions.size());
+        for (const auto& session : sessions) {
+            auto peer = session->Snapshot();
+            if (const auto it = forwarding.find(peer.session_id); it != forwarding.end()) {
+                peer.subscribe_tracks = it->second.subscribe_tracks;
+                peer.publishes = it->second.publishes;
+            }
+            peers.push_back(std::move(peer));
+        }
+        return peers;
     }
 
     void Engine::PeerConnectionClosed(uint64_t session_id)

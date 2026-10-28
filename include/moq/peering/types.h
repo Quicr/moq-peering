@@ -168,4 +168,44 @@ namespace moq::peering {
         virtual void OnPeerDown(std::uint64_t session_id) { (void)session_id; }
     };
 
+    /// Whether this node accepted the peer or opened the connection itself.
+    enum class PeerOrigin : std::uint8_t
+    {
+        kAccepted = 0, ///< The peer connected to this node and the connection was accepted
+        kDialed,       ///< This node opened the connection to the peer
+    };
+
+    /// Handshake state of one peering session.
+    enum class PeerLinkStatus : std::uint8_t
+    {
+        kConnecting = 0,
+        kConnected,
+        kDisconnected,
+    };
+
+    /// One peering session, copied for readers outside the peering threads.
+    struct PeerSnapshot
+    {
+        std::uint64_t session_id{ 0 };
+        PeerOrigin origin{ PeerOrigin::kAccepted };
+        PeerLinkStatus status{ PeerLinkStatus::kConnecting };
+        std::string host;
+        std::uint16_t port{ 0 };
+
+        /// True after the peering handshake has supplied the remote node identity.
+        bool identified{ false };
+        std::uint64_t node_id{ 0 };
+        std::string contact;
+        NodeType node_type{ NodeType::kEdge };
+
+        /// Smoothed RTT in microseconds. Zero when the connection has no sample yet.
+        std::uint64_t srtt_us{ 0 };
+
+        /// Tracks this relay is forwarding to the peer because of a subscribe.
+        std::uint64_t subscribe_tracks{ 0 };
+
+        /// Tracks arriving from the peer that this relay is forwarding onward.
+        std::uint64_t publishes{ 0 };
+    };
+
 } // namespace moq::peering

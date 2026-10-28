@@ -54,6 +54,11 @@ namespace moq::peering {
         return impl_->engine.HasSubscribers(track_hash);
     }
 
+    std::vector<PeerSnapshot> PeerManager::Peers()
+    {
+        return impl_->engine.Peers();
+    }
+
     void PeerManager::SendData(std::uint64_t track_hash,
                                uint8_t priority,
                                uint32_t ttl_ms,

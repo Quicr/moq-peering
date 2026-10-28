@@ -345,4 +345,43 @@ namespace moq::peering {
 
         return is_updated;
     }
+
+    std::map<PeerSessionId, ForwardingBase::SessionForwardingCounts> ForwardingBase::ForwardingCountsBySession() const
+    {
+        std::lock_guard _(mutex_);
+
+        std::map<PeerSessionId, SessionForwardingCounts> counts;
+
+        // Local publishes sent to a peer to satisfy a subscribe. One entry is one track.
+        for (const auto& entry : client_fib_) {
+            const auto session_id = entry.first.second;
+            if (session_id == 0) {
+                continue;
+            }
+            counts[session_id].subscribe_tracks++;
+        }
+
+        // Objects received from a peer and sent on to another peer or to a local subscriber.
+        for (const auto& entry : peer_fib_) {
+            const auto& egress = entry.second;
+            if (egress.empty()) {
+                continue;
+            }
+
+            const auto ingress_id = entry.first.first;
+            if (ingress_id != 0) {
+                counts[ingress_id].publishes++;
+            }
+
+            for (const auto& egress_entry : egress) {
+                const auto egress_id = egress_entry.first;
+                if (egress_id == 0) {
+                    continue;
+                }
+                counts[egress_id].subscribe_tracks++;
+            }
+        }
+
+        return counts;
+    }
 }

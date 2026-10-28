@@ -91,6 +91,9 @@ namespace moq::peering {
                       uint64_t subgroup_id,
                       std::shared_ptr<const std::vector<uint8_t>> data);
 
+        /// Copy of the current accepted and dialed sessions. Does not include withdrawn peers.
+        std::vector<PeerSnapshot> Peers();
+
       private:
         void NewPeerConnection(const std::shared_ptr<QuicConnection>& connection);
         void PeerConnectionClosed(uint64_t session_id);

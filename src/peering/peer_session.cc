@@ -77,6 +77,39 @@ namespace moq::peering {
         return status_;
     }
 
+    PeerSnapshot PeerSession::Snapshot()
+    {
+        auto connection = connection_;
+        if (connection) {
+            metrics_.srtt_us = connection->RttUs();
+        }
+
+        PeerSnapshot peer;
+        peer.session_id = connection ? connection->Id() : 0;
+        peer.origin = is_inbound_ ? PeerOrigin::kAccepted : PeerOrigin::kDialed;
+        switch (status_) {
+            case StatusValue::kConnecting:
+                peer.status = PeerLinkStatus::kConnecting;
+                break;
+            case StatusValue::kConnected:
+                peer.status = PeerLinkStatus::kConnected;
+                break;
+            case StatusValue::kDisconnected:
+                peer.status = PeerLinkStatus::kDisconnected;
+                break;
+        }
+        peer.host = peer_host_;
+        peer.port = peer_port_;
+        peer.identified = !remote_node_info_.contact.empty();
+        if (peer.identified) {
+            peer.node_id = remote_node_info_.id;
+            peer.contact = remote_node_info_.contact;
+            peer.node_type = remote_node_info_.type;
+        }
+        peer.srtt_us = metrics_.srtt_us;
+        return peer;
+    }
+
     void PeerSession::Connect()
     {
         status_ = StatusValue::kConnecting;

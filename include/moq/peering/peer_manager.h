@@ -5,6 +5,7 @@
 #include <moq/peering/types.h>
 
 #include <memory>
+#include <vector>
 
 namespace moq::peering {
 
@@ -46,6 +47,9 @@ namespace moq::peering {
 
         /// Full track-name hash used on the wire and by SendData, Unsubscribe, and HasSubscribers.
         static std::uint64_t HashTrack(const TrackName& name);
+
+        /// Accepted peers and peers this node dialed, with the latest smoothed RTT.
+        std::vector<PeerSnapshot> Peers();
 
         /// True when at least one peer still wants objects for this track.
         bool HasSubscribers(std::uint64_t track_hash) const;

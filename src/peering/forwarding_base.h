@@ -126,6 +126,21 @@ namespace moq::peering {
          */
         bool SelectBestNode(NodeIdValueType node_id);
 
+        /**
+         * @brief Tracks currently forwarded on each peering session
+         *
+         * @details subscribe_tracks counts tracks this relay is sending to that session. publishes
+         *      counts tracks arriving from that session that are forwarded onward. Session id 0 is
+         *      the local client path and is omitted.
+         */
+        struct SessionForwardingCounts
+        {
+            std::uint64_t subscribe_tracks{ 0 };
+            std::uint64_t publishes{ 0 };
+        };
+
+        std::map<PeerSessionId, SessionForwardingCounts> ForwardingCountsBySession() const;
+
         struct NodeItem
         {
             std::weak_ptr<PeerSession> peer_session;

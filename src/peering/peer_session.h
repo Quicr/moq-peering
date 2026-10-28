@@ -65,6 +65,12 @@ namespace moq::peering {
 
         PeerSessionId GetSessionId() const { return connection_ ? connection_->Id() : 0; }
 
+        /// Accepted when this session was created for an inbound connection.
+        bool Inbound() const { return is_inbound_; }
+
+        /// Identity, role, status, and a fresh smoothed RTT.
+        PeerSnapshot Snapshot();
+
         std::shared_ptr<QuicStream> CreateStream(uint8_t priority) const;
 
         void CloseStream(const std::shared_ptr<QuicStream>& stream, StreamClose flag);
