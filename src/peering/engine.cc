@@ -7,9 +7,14 @@
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 
+// Host matching resolves names with getaddrinfo. On Windows those declarations
+// come from Winsock, which picoquic.h already includes. The POSIX headers are
+// not present there.
+#ifndef _WIN32
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
