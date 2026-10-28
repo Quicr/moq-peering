@@ -51,6 +51,27 @@ namespace moq::peering {
         /// Accepted peers and peers this node dialed, with the latest smoothed RTT.
         std::vector<PeerSnapshot> Peers();
 
+        /// Numeric node id peering assigned this relay. It does not change after startup.
+        std::uint64_t LocalNodeId() const;
+
+        /**
+         * @brief Dial host:port, or remember it when that peer is already accepted
+         *
+         * @details An address that is already dialed is a duplicate. An accepted session from that
+         *      host is left up. The address is kept so this node dials it if the inbound session closes.
+         */
+        PeerAdminResult AddPeer(const std::string& host, std::uint16_t port);
+
+        /// Disconnect host:port and drop its forwarding state. Missing peers fail.
+        PeerAdminResult RemovePeer(const std::string& host, std::uint16_t port);
+
+        /**
+         * @brief Drop a peer's connection and forwarding state
+         *
+         * @details A dialed peer is connected again. An accepted peer is only disconnected.
+         */
+        PeerAdminResult RestartPeer(const std::string& host, std::uint16_t port);
+
         /// True when at least one peer still wants objects for this track.
         bool HasSubscribers(std::uint64_t track_hash) const;
 

@@ -4,9 +4,15 @@
 #include <moq/peering/peer_manager.h>
 
 #include "peering/engine.h"
+#include "peering/messages/node_info.h"
 #include "peering/name.h"
 
 namespace moq::peering {
+    std::string FormatNodeId(std::uint64_t id)
+    {
+        return NodeId().Value(id);
+    }
+
     struct PeerManager::Impl
     {
         explicit Impl(Config config)
@@ -57,6 +63,26 @@ namespace moq::peering {
     std::vector<PeerSnapshot> PeerManager::Peers()
     {
         return impl_->engine.Peers();
+    }
+
+    std::uint64_t PeerManager::LocalNodeId() const
+    {
+        return impl_->engine.LocalNodeId();
+    }
+
+    PeerAdminResult PeerManager::AddPeer(const std::string& host, std::uint16_t port)
+    {
+        return impl_->engine.AddPeer(host, port);
+    }
+
+    PeerAdminResult PeerManager::RemovePeer(const std::string& host, std::uint16_t port)
+    {
+        return impl_->engine.RemovePeer(host, port);
+    }
+
+    PeerAdminResult PeerManager::RestartPeer(const std::string& host, std::uint16_t port)
+    {
+        return impl_->engine.RestartPeer(host, port);
     }
 
     void PeerManager::SendData(std::uint64_t track_hash,

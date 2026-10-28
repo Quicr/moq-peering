@@ -7,7 +7,13 @@
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
+
+#include <algorithm>
 #include <chrono>
+#include <set>
 
 #define LOGGER config_.logger
 
@@ -397,8 +403,21 @@ namespace moq::peering {
 
                 PropagateNodeInfo(remote_node_info, true);
 
+                // Tracks this session was forwarding. Captured before purge deletes the entries, then
+                // repathed against the best session that remains.
+                std::set<std::uint64_t> forwarded_tracks;
+                {
+                    std::lock_guard lock(info_base_->mutex_);
+                    for (const auto& entry : info_base_->client_fib_) {
+                        if (entry.first.second == peer_session_id) {
+                            forwarded_tracks.insert(entry.first.first);
+                        }
+                    }
+                }
+
+                std::vector<NodeIdValueType> gone;
                 if (!stop_)
-                    info_base_->PurgePeerSessionInfo(peer_session_id);
+                    gone = info_base_->PurgePeerSessionInfo(peer_session_id);
 
                 // Remove or find new best peer for subscribe info
                 std::vector<SubscribeInfo> remove_sub;
@@ -407,19 +426,17 @@ namespace moq::peering {
                 std::unique_lock ib_lock(info_base_->mutex_);
                 for (const auto& [_, by_source] : info_base_->subscribes_) {
                     for (const auto& [source_id, si] : by_source) {
-                        if (source_id == remote_node_info.id) {
+                        const bool source_gone = source_id == remote_node_info.id ||
+                                                 std::find(gone.begin(), gone.end(), source_id) != gone.end();
+                        if (source_gone) {
                             remove_sub.emplace_back(si);
                             continue;
                         }
 
-                        // This session may be the path toward the subscriber. Repath, or withdraw that subscribe.
-                        auto cfib_it =
-                          info_base_->client_fib_.find({ si.details.track_hash.track_fullname_hash, peer_session_id });
-                        if (cfib_it == info_base_->client_fib_.end()) {
+                        const auto track_hash = si.details.track_hash.track_fullname_hash;
+                        if (!forwarded_tracks.contains(track_hash)) {
                             continue;
                         }
-
-                        info_base_->client_fib_.erase(cfib_it);
 
                         // Same recursive mutex. Keep it held so `si` cannot be freed by another peering thread.
                         const auto best_peer = info_base_->GetBestPeerSession(si.track.source_node_id);
@@ -438,6 +455,23 @@ namespace moq::peering {
 
                 for (auto& [id, si] : update_sub) {
                     SubscribeInfoReceived(id, si, false);
+                }
+
+                if (!gone.empty()) {
+                    std::vector<AnnounceInfo> drop_announces;
+                    {
+                        std::lock_guard lock(info_base_->mutex_);
+                        for (const auto& [_, by_source] : info_base_->announces_) {
+                            for (const auto& [source_id, info] : by_source) {
+                                if (std::find(gone.begin(), gone.end(), source_id) != gone.end()) {
+                                    drop_announces.push_back(info);
+                                }
+                            }
+                        }
+                    }
+                    for (auto& info : drop_announces) {
+                        AnnounceInfoReceived(peer_session_id, info, true);
+                    }
                 }
 
                 // Remove all announces if no active peering sessions exists
@@ -1348,16 +1382,36 @@ namespace moq::peering {
         throw std::invalid_argument("Peer session id does not exist");
     }
 
-    void Engine::CreatePeerSession(const std::string& host, uint16_t port)
+    bool Engine::CreatePeerSession(const std::string& host, uint16_t port)
     {
         auto peer_sess = std::make_shared<PeerSession>(false, config_, node_info_, host, port, *this);
         peer_sess->Connect();
-        if (peer_sess->GetSessionId() == 0) {
-            return;
+        auto key = peer_sess->GetSessionId();
+
+        bool duplicate{ false };
+        {
+            std::lock_guard lock(mutex_);
+            for (const auto& [_, session] : client_peer_sessions_) {
+                if (session && session->peer_host_ == host && session->peer_port_ == port) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                if (key == 0) {
+                    key = next_placeholder_--;
+                }
+                client_peer_sessions_.emplace(key, peer_sess);
+            }
         }
 
-        client_peer_sessions_.try_emplace(peer_sess->GetSessionId(), peer_sess);
+        if (duplicate) {
+            peer_sess->Disconnect();
+            return false;
+        }
+
         peer_sess->Begin();
+        return true;
     }
 
     void Engine::CheckThread(int interval_ms)
@@ -1418,6 +1472,15 @@ namespace moq::peering {
                         client_peer_sessions_.erase(it);
                         client_peer_sessions_.try_emplace(item.new_id, item.session);
                     }
+                }
+
+                std::vector<std::pair<std::string, std::uint16_t>> pending;
+                {
+                    std::lock_guard lock(mutex_);
+                    pending.swap(pending_dials_);
+                }
+                for (const auto& [host, port] : pending) {
+                    CreatePeerSession(host, port);
                 }
             }
 
@@ -1506,6 +1569,7 @@ namespace moq::peering {
             server_peer_sessions_.erase(peer_it);
         }
 
+        const auto host = peer_sess->peer_host_;
         SPDLOG_LOGGER_DEBUG(LOGGER, "Peer conn_id {0} closed", session_id);
 
         /*
@@ -1514,9 +1578,10 @@ namespace moq::peering {
          * session has not already seen the status change, to avoid withdrawing the peer's info twice.
          */
         if (peer_sess->Status() != PeerSession::StatusValue::kDisconnected) {
-            SessionChanged(
-              peer_sess->GetSessionId(), PeerSession::StatusValue::kDisconnected, peer_sess->remote_node_info_);
+            SessionChanged(session_id, PeerSession::StatusValue::kDisconnected, peer_sess->remote_node_info_);
         }
+
+        DialAfterInboundLoss(host);
     }
 
     void Engine::CloseFibStreams(ForwardingBase::FibEntry& entry)
@@ -1562,6 +1627,401 @@ namespace moq::peering {
                 }
             }
         }
+    }
+
+    namespace {
+        std::string StripHostBrackets(std::string host)
+        {
+            if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+                host = host.substr(1, host.size() - 2);
+            }
+            return host;
+        }
+
+        std::set<std::string> HostNames(const std::string& host)
+        {
+            std::set<std::string> names;
+            const auto bare = StripHostBrackets(host);
+            if (!bare.empty()) {
+                names.insert(bare);
+            }
+
+            addrinfo hints{};
+            hints.ai_family = AF_UNSPEC;
+            hints.ai_socktype = SOCK_DGRAM;
+            addrinfo* result = nullptr;
+            if (getaddrinfo(bare.c_str(), nullptr, &hints, &result) != 0) {
+                return names;
+            }
+
+            for (auto* info = result; info != nullptr; info = info->ai_next) {
+                char text[INET6_ADDRSTRLEN] = {};
+                if (info->ai_family == AF_INET) {
+                    const auto* address = reinterpret_cast<sockaddr_in*>(info->ai_addr);
+                    inet_ntop(AF_INET, &address->sin_addr, text, sizeof(text));
+                } else if (info->ai_family == AF_INET6) {
+                    const auto* address = reinterpret_cast<sockaddr_in6*>(info->ai_addr);
+                    inet_ntop(AF_INET6, &address->sin6_addr, text, sizeof(text));
+                }
+                if (text[0] != '\0') {
+                    names.insert(text);
+                }
+            }
+            freeaddrinfo(result);
+            return names;
+        }
+
+        bool HostsMatch(const std::string& left, const std::string& right)
+        {
+            if (left == right) {
+                return true;
+            }
+            const auto names = HostNames(left);
+            const auto other = HostNames(right);
+            for (const auto& name : names) {
+                if (other.contains(name)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    } // namespace
+
+    std::string Engine::PeerAddressText(const std::string& host, std::uint16_t port)
+    {
+        if (host.find(':') != std::string::npos) {
+            return "[" + host + "]:" + std::to_string(port);
+        }
+        return host + ":" + std::to_string(port);
+    }
+
+    std::vector<Engine::LocatedPeer> Engine::LocatePeers(const std::string& host, std::uint16_t port)
+    {
+        struct Candidate
+        {
+            std::shared_ptr<PeerSession> session;
+            PeerSessionId key{ 0 };
+            bool inbound{ false };
+            std::string host;
+            std::uint16_t port{ 0 };
+        };
+
+        std::vector<Candidate> candidates;
+        {
+            std::lock_guard lock(mutex_);
+            candidates.reserve(server_peer_sessions_.size() + client_peer_sessions_.size());
+            for (const auto& [key, session] : server_peer_sessions_) {
+                if (session) {
+                    candidates.push_back(Candidate{ session, key, true, session->peer_host_, session->peer_port_ });
+                }
+            }
+            for (const auto& [key, session] : client_peer_sessions_) {
+                if (session) {
+                    candidates.push_back(Candidate{ session, key, false, session->peer_host_, session->peer_port_ });
+                }
+            }
+        }
+
+        const auto wanted = HostNames(host);
+        std::vector<LocatedPeer> found;
+        for (const auto& candidate : candidates) {
+            const auto have = HostNames(candidate.host);
+            bool same_host = wanted.contains(candidate.host) || have.contains(host);
+            if (!same_host) {
+                for (const auto& name : wanted) {
+                    if (have.contains(name)) {
+                        same_host = true;
+                        break;
+                    }
+                }
+            }
+            if (!same_host) {
+                continue;
+            }
+
+            LocatedPeer peer;
+            peer.session = candidate.session;
+            peer.key = candidate.key;
+            peer.inbound = candidate.inbound;
+            peer.exact = candidate.port == port;
+            found.push_back(std::move(peer));
+        }
+        return found;
+    }
+
+    void Engine::RetireSession(const std::shared_ptr<PeerSession>& session, PeerSessionId map_key, bool erase)
+    {
+        const auto status = session->Status();
+        const auto remote = session->remote_node_info_;
+        const bool inbound = session->Inbound();
+
+        session->Disconnect();
+        session->MarkDisconnected();
+
+        if (status != PeerSession::StatusValue::kDisconnected && map_key != 0) {
+            SessionChanged(map_key, PeerSession::StatusValue::kDisconnected, remote);
+        } else if (map_key != 0) {
+            info_base_->PurgePeerSessionInfo(map_key);
+        }
+
+        session->ClearLocalState();
+
+        {
+            std::lock_guard lock(mutex_);
+            for (const auto& [_, other] : client_peer_sessions_) {
+                if (other && other != session) {
+                    other->ForgetIngress(map_key);
+                }
+            }
+            for (const auto& [_, other] : server_peer_sessions_) {
+                if (other && other != session) {
+                    other->ForgetIngress(map_key);
+                }
+            }
+
+            if (erase) {
+                auto& table = inbound ? server_peer_sessions_ : client_peer_sessions_;
+                const auto it = table.find(map_key);
+                if (it != table.end() && it->second == session) {
+                    table.erase(it);
+                }
+            }
+        }
+    }
+
+    void Engine::ReconnectDialed(const std::shared_ptr<PeerSession>& session, PeerSessionId map_key)
+    {
+        RetireSession(session, map_key, false);
+        session->Connect();
+        auto new_id = session->GetSessionId();
+
+        {
+            std::lock_guard lock(mutex_);
+            const auto it = client_peer_sessions_.find(map_key);
+            if (it != client_peer_sessions_.end() && it->second == session) {
+                client_peer_sessions_.erase(it);
+                if (new_id == 0) {
+                    new_id = next_placeholder_--;
+                }
+                client_peer_sessions_.emplace(new_id, session);
+            }
+        }
+
+        session->Begin();
+    }
+
+    void Engine::DialAfterInboundLoss(const std::string& remote_host)
+    {
+        std::vector<std::pair<std::string, std::uint16_t>> redial;
+        std::vector<std::pair<std::string, std::uint16_t>> dialed;
+        {
+            std::lock_guard lock(mutex_);
+            redial.assign(inbound_redial_.begin(), inbound_redial_.end());
+            dialed.reserve(client_peer_sessions_.size());
+            for (const auto& [_, session] : client_peer_sessions_) {
+                if (session) {
+                    dialed.emplace_back(session->peer_host_, session->peer_port_);
+                }
+            }
+        }
+
+        std::vector<std::pair<std::string, std::uint16_t>> drop;
+        std::vector<std::pair<std::string, std::uint16_t>> dial;
+        for (const auto& item : redial) {
+            if (!HostsMatch(item.first, remote_host)) {
+                continue;
+            }
+            bool already_dialed{ false };
+            for (const auto& existing : dialed) {
+                if (existing.second == item.second && HostsMatch(existing.first, item.first)) {
+                    already_dialed = true;
+                    break;
+                }
+            }
+            drop.push_back(item);
+            if (!already_dialed) {
+                dial.push_back(item);
+            }
+        }
+
+        if (!drop.empty()) {
+            std::lock_guard lock(mutex_);
+            for (const auto& item : drop) {
+                inbound_redial_.erase(item);
+            }
+        }
+
+        if (dial.empty()) {
+            return;
+        }
+
+        std::lock_guard lock(mutex_);
+        for (const auto& item : dial) {
+            SPDLOG_LOGGER_INFO(
+              LOGGER, "Dialing peer {} after the inbound session closed", PeerAddressText(item.first, item.second));
+            pending_dials_.push_back(item);
+        }
+    }
+
+    void Engine::EraseRedial(const std::string& host)
+    {
+        std::vector<std::pair<std::string, std::uint16_t>> redial;
+        {
+            std::lock_guard lock(mutex_);
+            redial.assign(inbound_redial_.begin(), inbound_redial_.end());
+        }
+
+        std::vector<std::pair<std::string, std::uint16_t>> drop;
+        for (const auto& item : redial) {
+            if (HostsMatch(item.first, host)) {
+                drop.push_back(item);
+            }
+        }
+        if (drop.empty()) {
+            return;
+        }
+
+        std::lock_guard lock(mutex_);
+        for (const auto& item : drop) {
+            inbound_redial_.erase(item);
+        }
+    }
+
+    PeerAdminResult Engine::AddPeer(const std::string& host, std::uint16_t port)
+    {
+        const auto address = StripHostBrackets(host);
+        PeerAdminResult result;
+        result.host = address;
+        result.port = port;
+
+        const auto found = LocatePeers(address, port);
+        bool dialed{ false };
+        bool accepted{ false };
+        for (const auto& peer : found) {
+            if (!peer.inbound && peer.exact) {
+                dialed = true;
+            }
+            if (peer.inbound) {
+                accepted = true;
+            }
+        }
+
+        const auto text = PeerAddressText(address, port);
+        if (dialed) {
+            result.message = "duplicate peer " + text;
+            SPDLOG_LOGGER_WARN(LOGGER, "{}", result.message);
+            return result;
+        }
+
+        if (accepted) {
+            {
+                std::lock_guard lock(mutex_);
+                inbound_redial_.insert({ address, port });
+            }
+            result.ok = true;
+            result.action = "added";
+            result.message = "Added peer " + text + " but it is already accepted as inbound";
+            SPDLOG_LOGGER_INFO(LOGGER, "{}", result.message);
+            return result;
+        }
+
+        if (!CreatePeerSession(address, port)) {
+            result.message = "duplicate peer " + text;
+            SPDLOG_LOGGER_WARN(LOGGER, "{}", result.message);
+            return result;
+        }
+
+        result.ok = true;
+        result.action = "added";
+        result.message = "Added peer " + text;
+        SPDLOG_LOGGER_INFO(LOGGER, "{}", result.message);
+        return result;
+    }
+
+    PeerAdminResult Engine::RemovePeer(const std::string& host, std::uint16_t port)
+    {
+        const auto address = StripHostBrackets(host);
+        PeerAdminResult result;
+        result.host = address;
+        result.port = port;
+        const auto text = PeerAddressText(address, port);
+
+        std::vector<LocatedPeer> targets;
+        for (const auto& peer : LocatePeers(address, port)) {
+            if (peer.exact || peer.inbound) {
+                targets.push_back(peer);
+            }
+        }
+        if (targets.empty()) {
+            result.message = "peer " + text + " does not exist";
+            SPDLOG_LOGGER_WARN(LOGGER, "{}", result.message);
+            return result;
+        }
+
+        for (const auto& peer : targets) {
+            const auto remote_host = peer.session->peer_host_;
+            RetireSession(peer.session, peer.key, true);
+            EraseRedial(remote_host);
+        }
+        EraseRedial(address);
+
+        result.ok = true;
+        result.action = "removed";
+        result.message = "Removed peer " + text;
+        SPDLOG_LOGGER_INFO(LOGGER, "{}", result.message);
+        return result;
+    }
+
+    PeerAdminResult Engine::RestartPeer(const std::string& host, std::uint16_t port)
+    {
+        const auto address = StripHostBrackets(host);
+        PeerAdminResult result;
+        result.host = address;
+        result.port = port;
+        const auto text = PeerAddressText(address, port);
+
+        std::vector<LocatedPeer> targets;
+        for (const auto& peer : LocatePeers(address, port)) {
+            if (peer.exact || peer.inbound) {
+                targets.push_back(peer);
+            }
+        }
+        if (targets.empty()) {
+            result.message = "peer " + text + " does not exist";
+            SPDLOG_LOGGER_WARN(LOGGER, "{}", result.message);
+            return result;
+        }
+
+        std::string message;
+        auto append = [&](const std::string& line) {
+            if (!message.empty()) {
+                message += ". ";
+            }
+            message += line;
+            SPDLOG_LOGGER_INFO(LOGGER, "{}", line);
+        };
+
+        for (const auto& peer : targets) {
+            const bool connected = peer.session->Status() == PeerSession::StatusValue::kConnected;
+            if (!connected) {
+                append("Peer " + text + " is not connected");
+            }
+
+            if (peer.inbound) {
+                const auto remote_host = peer.session->peer_host_;
+                RetireSession(peer.session, peer.key, true);
+                append("Disconnected peer " + text + " because it was accepted as inbound");
+                DialAfterInboundLoss(remote_host);
+            } else {
+                ReconnectDialed(peer.session, peer.key);
+                append("Restarted peer " + text);
+            }
+        }
+
+        result.ok = true;
+        result.action = "restarted";
+        result.message = std::move(message);
+        return result;
     }
 
 } // namespace moq::peering

@@ -71,6 +71,18 @@ namespace moq::peering {
         /// Identity, role, status, and a fresh smoothed RTT.
         PeerSnapshot Snapshot();
 
+        /// The QUIC connection is gone. Further callbacks from it are ignored.
+        void MarkDisconnected();
+
+        /// Record connect time the first time this attempt becomes connected.
+        void NoteConnected();
+
+        /// Drop subscribe and publish forwarding state held on this session.
+        void ClearLocalState();
+
+        /// Drop peer-to-peer forwarding state that arrived from peer_session_id.
+        void ForgetIngress(PeerSessionId peer_session_id);
+
         std::shared_ptr<QuicStream> CreateStream(uint8_t priority) const;
 
         void CloseStream(const std::shared_ptr<QuicStream>& stream, StreamClose flag);
@@ -143,6 +155,9 @@ namespace moq::peering {
         struct Metrics
         {
             uint64_t srtt_us{ 0 };
+
+            /// Unix time in microseconds when this attempt became connected. Zero when it is not.
+            uint64_t connect_time_us{ 0 };
         } metrics_;
 
       private:

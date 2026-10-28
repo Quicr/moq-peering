@@ -10,6 +10,7 @@
 #include "peering/messages/node_info.h"
 #include "peering/messages/subscribe_info.h"
 
+#include <chrono>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -107,16 +108,60 @@ namespace moq::peering {
             peer.node_type = remote_node_info_.type;
         }
         peer.srtt_us = metrics_.srtt_us;
+        peer.connect_time_us = status_ == StatusValue::kConnected ? metrics_.connect_time_us : 0;
         return peer;
+    }
+
+    void PeerSession::MarkDisconnected()
+    {
+        status_ = StatusValue::kDisconnected;
+        connection_closed_ = true;
+        metrics_.connect_time_us = 0;
+    }
+
+    void PeerSession::NoteConnected()
+    {
+        if (metrics_.connect_time_us != 0) {
+            return;
+        }
+
+        const auto now = std::chrono::system_clock::now().time_since_epoch();
+        metrics_.connect_time_us =
+          static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+    }
+
+    void PeerSession::ClearLocalState()
+    {
+        sub_sns_.clear();
+        peer_sns_.clear();
+        pending_data_.clear();
+        rx_stream_headers_.clear();
+        rx_pending_.clear();
+        controL_msg_buffer_.clear();
+        control_stream_.reset();
+        control_stream_id_.reset();
+    }
+
+    void PeerSession::ForgetIngress(PeerSessionId peer_session_id)
+    {
+        for (auto it = peer_sns_.begin(); it != peer_sns_.end();) {
+            if (it->first.first == peer_session_id) {
+                it = peer_sns_.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 
     void PeerSession::Connect()
     {
         status_ = StatusValue::kConnecting;
         remote_node_info_ = {};
+        metrics_.connect_time_us = 0;
 
         if (is_inbound_) {
             status_ = StatusValue::kConnected;
+            NoteConnected();
             return;
         }
 
@@ -459,6 +504,9 @@ namespace moq::peering {
 
                         const bool became_connected = status_ != StatusValue::kConnected;
                         status_ = StatusValue::kConnected;
+                        if (became_connected) {
+                            NoteConnected();
+                        }
 
                         manager_.NodeReceived(GetSessionId(), connect.node_info, false);
                         if (became_connected) {
@@ -488,6 +536,7 @@ namespace moq::peering {
                         const bool became_connected = status_ != StatusValue::kConnected;
                         status_ = StatusValue::kConnected;
                         if (became_connected) {
+                            NoteConnected();
                             manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
                         }
 
@@ -629,6 +678,7 @@ namespace moq::peering {
             SPDLOG_LOGGER_DEBUG(LOGGER, "Peer conn_id {0} is ready", conn_id);
             if (status_ != StatusValue::kConnected) {
                 status_ = StatusValue::kConnected;
+                NoteConnected();
                 manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
             }
             return;
@@ -649,8 +699,13 @@ namespace moq::peering {
         }
         connection_closed_ = true;
         status_ = StatusValue::kDisconnected;
-        SPDLOG_LOGGER_DEBUG(LOGGER, "Peer conn_id {0} is disconnected", GetSessionId());
-        manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
+        metrics_.connect_time_us = 0;
+        const auto session_id = GetSessionId();
+        SPDLOG_LOGGER_DEBUG(LOGGER, "Peer conn_id {0} is disconnected", session_id);
+        manager_.SessionChanged(session_id, status_, remote_node_info_);
+        if (is_inbound_) {
+            manager_.PeerConnectionClosed(session_id);
+        }
     }
 
     void PeerSession::OnStream(uint64_t stream_id, bool bidirectional, std::vector<uint8_t> data, bool fin)

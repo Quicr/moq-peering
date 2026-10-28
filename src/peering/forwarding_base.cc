@@ -44,11 +44,9 @@ namespace moq::peering {
         }
     }
 
-    void ForwardingBase::PurgePeerSessionInfo(PeerSessionId peer_session_id)
+    std::vector<NodeIdValueType> ForwardingBase::PurgePeerSessionInfo(PeerSessionId peer_session_id)
     {
-        std::vector<NodeIdValueType> node_ids;
-        node_ids.reserve(10);
-
+        std::vector<NodeIdValueType> gone;
         std::lock_guard _(mutex_);
 
         auto ids_it = nodes_by_peer_session_.find(peer_session_id);
@@ -59,25 +57,53 @@ namespace moq::peering {
                 if (nodes_best_.erase(node_id) > 0) {
                     SelectBestNode(node_id);
                 }
+
+                bool still_reachable{ false };
+                for (const auto& entry : nodes_) {
+                    if (entry.first.first == node_id) {
+                        still_reachable = true;
+                        break;
+                    }
+                }
+                if (!still_reachable) {
+                    gone.push_back(node_id);
+                }
             }
 
             nodes_by_peer_session_.erase(ids_it);
         }
 
-        std::vector<std::pair<PeerSessionId, SubscribeNodeSetId>> fib_entries;
-        for (auto it = peer_fib_.lower_bound({ peer_session_id, 0 }); it != peer_fib_.end(); it++) {
-            auto& [key, fib_entry] = *it;
+        for (auto it = client_fib_.begin(); it != client_fib_.end();) {
+            if (it->first.second == peer_session_id) {
+                it = client_fib_.erase(it);
+            } else {
+                ++it;
+            }
+        }
 
-            if (key.first != peer_session_id) {
-                break;
+        for (auto it = peer_fib_.begin(); it != peer_fib_.end();) {
+            auto& egress = it->second;
+            if (it->first.first == peer_session_id) {
+                it = peer_fib_.erase(it);
+                continue;
             }
 
-            fib_entries.push_back(key);
+            for (auto egress_it = egress.begin(); egress_it != egress.end();) {
+                if (egress_it->first == peer_session_id) {
+                    egress_it = egress.erase(egress_it);
+                } else {
+                    ++egress_it;
+                }
+            }
+
+            if (egress.empty()) {
+                it = peer_fib_.erase(it);
+            } else {
+                ++it;
+            }
         }
 
-        for (const auto& key : fib_entries) {
-            peer_fib_.erase(key);
-        }
+        return gone;
     }
 
     bool ForwardingBase::HasSubscribers(const SubscribeInfo& subscribe_info)

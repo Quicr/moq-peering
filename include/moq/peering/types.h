@@ -183,6 +183,9 @@ namespace moq::peering {
         kDisconnected,
     };
 
+    /// Peering node id text. This is `NodeId::Value(uint64_t)`, `high.high:low.low`.
+    std::string FormatNodeId(std::uint64_t id);
+
     /// One peering session, copied for readers outside the peering threads.
     struct PeerSnapshot
     {
@@ -201,11 +204,24 @@ namespace moq::peering {
         /// Smoothed RTT in microseconds. Zero when the connection has no sample yet.
         std::uint64_t srtt_us{ 0 };
 
+        /// Unix time in microseconds when the current attempt became connected. Zero otherwise.
+        std::uint64_t connect_time_us{ 0 };
+
         /// Tracks this relay is forwarding to the peer because of a subscribe.
         std::uint64_t subscribe_tracks{ 0 };
 
         /// Tracks arriving from the peer that this relay is forwarding onward.
         std::uint64_t publishes{ 0 };
+    };
+
+    /// Result of an admin add, remove, or restart of one peer address.
+    struct PeerAdminResult
+    {
+        bool ok{ false };
+        std::string host;
+        std::uint16_t port{ 0 };
+        std::string action;
+        std::string message;
     };
 
 } // namespace moq::peering

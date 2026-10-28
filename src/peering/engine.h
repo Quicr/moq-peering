@@ -5,12 +5,15 @@
 #include <moq/peering/types.h>
 
 #include <atomic>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <span>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "forwarding_base.h"
 #include "messages/data_header.h"
@@ -94,11 +97,33 @@ namespace moq::peering {
         /// Copy of the current accepted and dialed sessions. Does not include withdrawn peers.
         std::vector<PeerSnapshot> Peers();
 
+        /// Numeric node id assigned from the configured node id. Immutable after construction.
+        std::uint64_t LocalNodeId() const { return node_info_.id; }
+
+        PeerAdminResult AddPeer(const std::string& host, std::uint16_t port);
+        PeerAdminResult RemovePeer(const std::string& host, std::uint16_t port);
+        PeerAdminResult RestartPeer(const std::string& host, std::uint16_t port);
+
       private:
         void NewPeerConnection(const std::shared_ptr<QuicConnection>& connection);
         void PeerConnectionClosed(uint64_t session_id);
         void CheckThread(int interval_ms);
-        void CreatePeerSession(const std::string& host, uint16_t port);
+        bool CreatePeerSession(const std::string& host, uint16_t port);
+
+        struct LocatedPeer
+        {
+            std::shared_ptr<PeerSession> session;
+            PeerSessionId key{ 0 };
+            bool inbound{ false };
+            bool exact{ false };
+        };
+
+        std::vector<LocatedPeer> LocatePeers(const std::string& host, std::uint16_t port);
+        void RetireSession(const std::shared_ptr<PeerSession>& session, PeerSessionId map_key, bool erase);
+        void ReconnectDialed(const std::shared_ptr<PeerSession>& session, PeerSessionId map_key);
+        void DialAfterInboundLoss(const std::string& remote_host);
+        void EraseRedial(const std::string& host);
+        static std::string PeerAddressText(const std::string& host, std::uint16_t port);
 
         void PropagateNodeInfo(const NodeInfo& node_info, bool withdraw = false);
         void PropagateNodeInfo(PeerSessionId peer_session_id, const NodeInfo& node_info, bool withdraw = false);
@@ -117,6 +142,12 @@ namespace moq::peering {
 
         std::map<PeerSessionId, std::shared_ptr<PeerSession>> server_peer_sessions_;
         std::map<PeerSessionId, std::shared_ptr<PeerSession>> client_peer_sessions_;
+
+        /// Accepted peers to dial if their inbound session closes. The port is the dial port.
+        std::set<std::pair<std::string, std::uint16_t>> inbound_redial_;
+        /// Redials waiting for the check thread, so a close callback does not dial inline.
+        std::vector<std::pair<std::string, std::uint16_t>> pending_dials_;
+        PeerSessionId next_placeholder_{ std::numeric_limits<PeerSessionId>::max() };
 
         std::shared_ptr<QuicEndpoint> server_endpoint_;
         std::thread check_thr_;

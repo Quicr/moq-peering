@@ -14,6 +14,7 @@
 
 #include <set>
 #include <unordered_map>
+#include <vector>
 
 namespace moq::peering {
 
@@ -44,7 +45,12 @@ namespace moq::peering {
         /**
          * @brief Purge peer session information
          */
-        void PurgePeerSessionInfo(PeerSessionId peer_session_id);
+        /**
+         * @brief Drop forwarding state installed by one peering session
+         *
+         * @return Node ids that were reached only through this session
+         */
+        std::vector<NodeIdValueType> PurgePeerSessionInfo(PeerSessionId peer_session_id);
 
         /**
          * @brief Add or update subscribe in the info base
