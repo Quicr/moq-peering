@@ -129,6 +129,27 @@ namespace moq::peering {
         void PropagateNodeInfo(PeerSessionId peer_session_id, const NodeInfo& node_info, bool withdraw = false);
         std::shared_ptr<PeerSession> GetPeerSession(PeerSessionId peer_session_id);
 
+        /**
+         * @brief Point new streams for one subscriber node at the peer now selected as best
+         *
+         * @details Caller does not hold the forwarding lock. Streams already open stay on the peer
+         *      that opened them until they end.
+         */
+        void MoveSubscriberToBest(NodeIdValueType node_id);
+        void MoveClientTrack(std::uint64_t track_hash,
+                             NodeIdValueType node_id,
+                             const std::shared_ptr<PeerSession>& best,
+                             const std::weak_ptr<PeerSession>& best_weak);
+        void RetireClientEgress(std::uint64_t track_hash, PeerSessionId session_id, NodeIdValueType moved_node);
+        void MovePeerEgress(NodeIdValueType node_id,
+                            const std::shared_ptr<PeerSession>& best,
+                            const std::weak_ptr<PeerSession>& best_weak);
+        bool OtherSubscriberUses(const std::shared_ptr<PeerSession>& session,
+                                 std::uint64_t track_hash,
+                                 NodeIdValueType except_node);
+        void ReleaseDrainedClient(std::uint64_t track_hash, PeerSessionId session_id);
+        void ReleaseDrainedPeerEgress(PeerSessionId ingress_id, SubscribeNodeSetId sns, PeerSessionId egress_id);
+
         static void CloseFibStreams(ForwardingBase::FibEntry& entry);
 
         Delegate* LoadDelegate() const { return delegate_.load(std::memory_order_acquire); }

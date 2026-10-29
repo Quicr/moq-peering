@@ -308,12 +308,19 @@ namespace moq::peering {
         bool is_updated{ false };
 
         std::weak_ptr<PeerSession> best_peer_session;
-
+        bool have_best{ false };
         NodeInfo best_node_info;
+
         auto best_it = nodes_best_.find(node_id);
         if (best_it != nodes_best_.end()) {
-            best_peer_session = best_it->second;
-            best_node_info = nodes_.at({ node_id, best_peer_session.lock()->GetSessionId() }).node_info;
+            if (const auto current = best_it->second.lock()) {
+                const auto item = nodes_.find({ node_id, current->GetSessionId() });
+                if (item != nodes_.end()) {
+                    best_peer_session = current;
+                    best_node_info = item->second.node_info;
+                    have_best = true;
+                }
+            }
         }
 
         for (auto it = nodes_.lower_bound({ node_id, 0 }); it != nodes_.end(); it++) {
@@ -323,10 +330,16 @@ namespace moq::peering {
                 break;
             }
 
-            if (best_peer_session.lock() == nullptr) {
+            const auto candidate = node_item.peer_session.lock();
+            if (!candidate) {
+                continue;
+            }
+
+            if (!have_best) {
                 is_updated = true;
-                best_peer_session = node_item.peer_session.lock();
-                best_node_info = nodes_.at({ node_id, best_peer_session.lock()->GetSessionId() }).node_info;
+                best_peer_session = candidate;
+                best_node_info = node_item.node_info;
+                have_best = true;
                 continue;
             }
 
@@ -336,15 +349,21 @@ namespace moq::peering {
              *
              * Choose the node that first matches the below in the order defined:
              *
-             * 1. Prefer lower size `path` (hops)
-             * 2. Prefer lower total sRTT
+             * 1. Prefer lower size `path` (hops). A longer path never wins on sRTT alone.
+             * 2. Prefer lower total sRTT when the hop count is the same.
              *
+             * Equal hop count and equal sRTT keep the peer already selected, so a repeated
+             * advertisement does not move streams.
              */
-            if (best_node_info.path.size() > node_item.node_info.path.size() ||
-                best_node_info.SumSrtt() > node_item.node_info.SumSrtt()) {
+            const auto candidate_hops = node_item.node_info.path.size();
+            const auto best_hops = best_node_info.path.size();
+            const bool shorter = candidate_hops < best_hops;
+            const bool same_hops_lower_rtt =
+              candidate_hops == best_hops && node_item.node_info.SumSrtt() < best_node_info.SumSrtt();
+            if (shorter || same_hops_lower_rtt) {
                 is_updated = true;
-                best_peer_session = node_item.peer_session.lock();
-                best_node_info = nodes_.at({ node_id, best_peer_session.lock()->GetSessionId() }).node_info;
+                best_peer_session = candidate;
+                best_node_info = node_item.node_info;
             }
         }
 

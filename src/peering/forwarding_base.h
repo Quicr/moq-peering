@@ -214,6 +214,15 @@ namespace moq::peering {
             SubscribeNodeSetId out_sns_id; ///< Egress SNS ID
             decltype(nodes_best_)::mapped_type peer_session;
             uint64_t track_fullname_hash{ 0 };
+
+            /**
+             * @brief Keep this egress only for streams already open
+             *
+             * @details A better peer has been chosen for the subscribers this entry was carrying.
+             *      Objects on streams already in `streams` stay on this peer until each stream ends.
+             *      New streams and datagrams use the new peer. The entry is removed once `streams` is empty.
+             */
+            bool drain{ false };
         };
 
         /**

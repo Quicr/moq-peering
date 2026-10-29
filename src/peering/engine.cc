@@ -105,10 +105,12 @@ namespace moq::peering {
 
         if (not withdraw) {
             if (info_base_->AddNode(peer_session, node_info)) {
-                // Add peer to path before advertising node
+                // Append this node, not the advertised one. The path records who forwarded the
+                // advertisement so the next hop can prefer a shorter path and stop loops.
                 auto adv_node_info = node_info;
-                adv_node_info.path.push_back({ adv_node_info.id, peer_session->metrics_.srtt_us });
+                adv_node_info.path.push_back({ peer_session->node_info_.id, peer_session->metrics_.srtt_us });
                 PropagateNodeInfo(adv_node_info);
+                MoveSubscriberToBest(node_info.id);
             }
         } else {
             info_base_->RemoveNode(peer_session_id, node_info.id);
@@ -240,16 +242,18 @@ namespace moq::peering {
                 }
             }
 
-            if (auto* delegate = LoadDelegate()) {
-                SPDLOG_LOGGER_DEBUG(LOGGER,
-                                    "Notifying delegate of subscribe fullname: {} new_group_request: {}",
-                                    subscribe_info.details.track_hash.track_fullname_hash,
-                                    subscribe_info.details.new_group_request_id.has_value()
-                                      ? static_cast<std::int64_t>(*subscribe_info.details.new_group_request_id)
-                                      : std::int64_t{ -1 });
-                delegate->OnPeerSubscribe(ToTrackName(subscribe_info.track.name_space, subscribe_info.track.name),
-                                          subscribe_info.details.track_hash.track_fullname_hash,
-                                          ToParams(subscribe_info));
+            if (is_updated) {
+                if (auto* delegate = LoadDelegate()) {
+                    SPDLOG_LOGGER_DEBUG(LOGGER,
+                                        "Notifying delegate of subscribe fullname: {} new_group_request: {}",
+                                        subscribe_info.details.track_hash.track_fullname_hash,
+                                        subscribe_info.details.new_group_request_id.has_value()
+                                          ? static_cast<std::int64_t>(*subscribe_info.details.new_group_request_id)
+                                          : std::int64_t{ -1 });
+                    delegate->OnPeerSubscribe(ToTrackName(subscribe_info.track.name_space, subscribe_info.track.name),
+                                              subscribe_info.details.track_hash.track_fullname_hash,
+                                              ToParams(subscribe_info));
+                }
             }
         } else {
             const auto track_hash = subscribe_info.details.track_hash.track_fullname_hash;
@@ -544,6 +548,11 @@ namespace moq::peering {
                     if (out_peer_sess_id == peer_session_id)
                         continue; // Skip; don't send back to same peer or if it's self
 
+                    if (entry.drain && (is_new_stream || eflags.reliable == false)) {
+                        // This peer is only finishing streams it already accepted.
+                        continue;
+                    }
+
                     if (out_peer_sess_id == 0) { // self; Client manager is interested
                         // TODO(tievens): Consider maintaining a client specific si map to avoid second map lookup
                         const auto sub_it = info_base_->subscribes_.find(data_header.track_full_name_hash);
@@ -661,6 +670,7 @@ namespace moq::peering {
     {
         std::lock_guard lock(info_base_->mutex_);
         const auto key = SubgroupStreamKey(group_id, subgroup_id);
+        std::vector<std::pair<std::uint64_t, PeerSessionId>> finished_drains;
 
         for (auto it = info_base_->client_fib_.lower_bound({ track_full_name_hash, 0 });
              it != info_base_->client_fib_.end();
@@ -686,8 +696,15 @@ namespace moq::peering {
                         peer_sess->FinishStream(stream_it->second);
                     }
                     fib_entry.streams.erase(stream_it);
+                    if (fib_entry.drain && fib_entry.streams.empty()) {
+                        finished_drains.push_back(it->first);
+                    }
                 }
             }
+        }
+
+        for (const auto& finished : finished_drains) {
+            ReleaseDrainedClient(finished.first, finished.second);
         }
     }
 
@@ -751,6 +768,10 @@ namespace moq::peering {
 
                 const auto peer_sess = fib_entry.peer_session.lock();
                 if (!peer_sess) {
+                    continue;
+                }
+
+                if (fib_entry.drain && (type == DataType::kDatagram || type == DataType::kNewStream)) {
                     continue;
                 }
 
@@ -1220,17 +1241,53 @@ namespace moq::peering {
                 }
             }
 
-            // Not ideal, but iterate over map of peers to remove entries that were not updated
+            // Nodes dropped from this SNS must leave the egress set. Entries refreshed above
+            // still name every node they had. New streams then follow the reduced set.
+            for (auto& [peer_sess_id, entry] : fib_it->second) {
+                if (entry.update_ref != update_ref || peer_sess_id == 0) {
+                    continue;
+                }
+                const auto out_peer = entry.peer_session.lock();
+                if (!out_peer) {
+                    continue;
+                }
+                const auto current = out_peer->FindPeerSns(peer_session.GetSessionId(), sns.id);
+                if (!current) {
+                    continue;
+                }
+                std::vector<NodeIdValueType> dropped;
+                for (const auto node_id : current->nodes) {
+                    if (!sns.nodes.contains(node_id)) {
+                        dropped.push_back(node_id);
+                    }
+                }
+                for (const auto node_id : dropped) {
+                    out_peer->RemovePeerSnsSourceNode(peer_session.GetSessionId(), sns.id, node_id);
+                }
+            }
+
+            // An egress the new set does not use keeps streams it already opened. Removing it
+            // here would drop the rest of those streams. New streams skip a drained egress.
             std::vector<PeerSessionId> remove_peers;
             for (auto& [peer_sess_id, entry] : fib_it->second) {
                 if (entry.update_ref == update_ref)
                     continue;
 
+                if (!entry.streams.empty()) {
+                    entry.drain = true;
+                    SPDLOG_LOGGER_DEBUG(LOGGER,
+                                        "SNS update draining peer session: {} sns id: {} open streams: {}",
+                                        peer_sess_id,
+                                        entry.out_sns_id,
+                                        entry.streams.size());
+                    continue;
+                }
+
                 SPDLOG_LOGGER_DEBUG(
                   LOGGER, "SNS update remove peer session: {} sns id: {}", peer_sess_id, entry.out_sns_id);
 
                 if (const auto peer_sess = entry.peer_session.lock()) {
-                    peer_sess->RemovePeerSnsSourceNode(peer_sess->GetSessionId(), sns.id, 0);
+                    peer_sess->RemovePeerSnsSourceNode(peer_session.GetSessionId(), sns.id, 0);
                 }
 
                 remove_peers.push_back(peer_sess_id);
@@ -1299,7 +1356,7 @@ namespace moq::peering {
                 if (peer_session.remote_node_info_.id == sub_info.track.source_node_id)
                     continue; // Skip, don't send self or remote to self
 
-                peer_session.SendSubscribeInfo(sub_info);
+                peer_session.SendSubscribeInfo(sub_info, false, false);
             }
         }
     }
@@ -1589,6 +1646,277 @@ namespace moq::peering {
         DialAfterInboundLoss(host);
     }
 
+    void Engine::MoveSubscriberToBest(NodeIdValueType node_id)
+    {
+        std::lock_guard lock(info_base_->mutex_);
+        const auto best_weak = info_base_->GetBestPeerSession(node_id);
+        const auto best = best_weak.lock();
+        if (!best) {
+            return;
+        }
+
+        std::vector<std::uint64_t> tracks;
+        for (const auto& [track_hash, by_source] : info_base_->subscribes_) {
+            if (by_source.contains(node_id)) {
+                tracks.push_back(track_hash);
+            }
+        }
+        for (const auto track_hash : tracks) {
+            MoveClientTrack(track_hash, node_id, best, best_weak);
+        }
+        MovePeerEgress(node_id, best, best_weak);
+    }
+
+    bool Engine::OtherSubscriberUses(const std::shared_ptr<PeerSession>& session,
+                                     std::uint64_t track_hash,
+                                     NodeIdValueType except_node)
+    {
+        const auto subs = info_base_->subscribes_.find(track_hash);
+        if (subs == info_base_->subscribes_.end() || !session) {
+            return false;
+        }
+
+        for (const auto& [source_id, _] : subs->second) {
+            if (source_id == except_node) {
+                continue;
+            }
+            const auto other = info_base_->GetBestPeerSession(source_id).lock();
+            if (other && other->GetSessionId() == session->GetSessionId()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void Engine::MoveClientTrack(std::uint64_t track_hash,
+                                 NodeIdValueType node_id,
+                                 const std::shared_ptr<PeerSession>& best,
+                                 const std::weak_ptr<PeerSession>& best_weak)
+    {
+        const auto sub = info_base_->subscribes_.find(track_hash);
+        if (sub == info_base_->subscribes_.end()) {
+            return;
+        }
+        const auto si = sub->second.find(node_id);
+        if (si == sub->second.end()) {
+            return;
+        }
+
+        const auto [sns_id, is_new] =
+          best->AddSubscribeSourceNode(track_hash, node_id, si->second.details.priority);
+        auto [fib_it, inserted] = info_base_->client_fib_.try_emplace(
+          { track_hash, best->GetSessionId() },
+          ForwardingBase::FibEntry{ static_cast<uint64_t>(std::rand()), {}, sns_id, best_weak });
+        if (!inserted) {
+            fib_it->second.drain = false;
+            fib_it->second.out_sns_id = sns_id;
+            fib_it->second.peer_session = best_weak;
+        }
+
+        std::vector<PeerSessionId> stale;
+        for (auto it = info_base_->client_fib_.lower_bound({ track_hash, 0 });
+             it != info_base_->client_fib_.end() && it->first.first == track_hash;
+             ++it) {
+            if (it->first.second != best->GetSessionId()) {
+                stale.push_back(it->first.second);
+            }
+        }
+
+        if (is_new || !stale.empty()) {
+            SPDLOG_LOGGER_INFO(LOGGER,
+                               "Subscriber {} track {} new streams use peer session {} (previous sessions: {})",
+                               NodeId().Value(node_id),
+                               track_hash,
+                               best->GetSessionId(),
+                               stale.size());
+        }
+
+        for (const auto session_id : stale) {
+            RetireClientEgress(track_hash, session_id, node_id);
+        }
+    }
+
+    void Engine::RetireClientEgress(std::uint64_t track_hash, PeerSessionId session_id, NodeIdValueType moved_node)
+    {
+        auto it = info_base_->client_fib_.find({ track_hash, session_id });
+        if (it == info_base_->client_fib_.end()) {
+            return;
+        }
+
+        auto session = it->second.peer_session.lock();
+        if (!session) {
+            if (it->second.streams.empty()) {
+                info_base_->client_fib_.erase(it);
+            } else {
+                it->second.drain = true;
+            }
+            return;
+        }
+
+        if (OtherSubscriberUses(session, track_hash, moved_node)) {
+            session->RemoveSubscribeSourceNode(track_hash, moved_node);
+            return;
+        }
+
+        if (it->second.streams.empty()) {
+            const auto nodes = session->SubscribeSourceNodes(track_hash);
+            info_base_->client_fib_.erase(it);
+            for (const auto node : nodes) {
+                session->RemoveSubscribeSourceNode(track_hash, node);
+            }
+            return;
+        }
+
+        it->second.drain = true;
+        SPDLOG_LOGGER_INFO(LOGGER,
+                           "Keeping {} open stream(s) for track {} on peer session {} until they end",
+                           it->second.streams.size(),
+                           track_hash,
+                           session_id);
+    }
+
+    void Engine::MovePeerEgress(NodeIdValueType node_id,
+                                const std::shared_ptr<PeerSession>& best,
+                                const std::weak_ptr<PeerSession>& best_weak)
+    {
+        std::vector<std::pair<PeerSessionId, SubscribeNodeSetId>> ingresses;
+        ingresses.reserve(info_base_->peer_fib_.size());
+        for (const auto& [key, _] : info_base_->peer_fib_) {
+            ingresses.push_back(key);
+        }
+
+        for (const auto& ingress : ingresses) {
+            auto fib = info_base_->peer_fib_.find(ingress);
+            if (fib == info_base_->peer_fib_.end() || best->GetSessionId() == ingress.first) {
+                continue;
+            }
+
+            bool reaches{ false };
+            uint8_t priority = 1;
+            for (const auto& [_, entry] : fib->second) {
+                const auto sess = entry.peer_session.lock();
+                if (!sess) {
+                    continue;
+                }
+                const auto sns = sess->FindPeerSns(ingress.first, ingress.second);
+                if (sns && sns->nodes.contains(node_id)) {
+                    reaches = true;
+                    priority = sns->priority;
+                    break;
+                }
+            }
+            if (!reaches) {
+                continue;
+            }
+
+            const auto [out_sns, _] = best->AddPeerSnsSourceNode(ingress.first, ingress.second, node_id, priority);
+            auto egress_it = fib->second.find(best->GetSessionId());
+            if (egress_it == fib->second.end()) {
+                fib->second.emplace(
+                  best->GetSessionId(),
+                  ForwardingBase::FibEntry{ static_cast<uint64_t>(std::rand()), {}, out_sns, best_weak });
+            } else {
+                egress_it->second.out_sns_id = out_sns;
+                egress_it->second.peer_session = best_weak;
+                egress_it->second.drain = false;
+            }
+
+            std::vector<PeerSessionId> stale;
+            for (const auto& [egress_id, entry] : fib->second) {
+                if (egress_id == best->GetSessionId() || egress_id == 0) {
+                    continue;
+                }
+                const auto sess = entry.peer_session.lock();
+                if (!sess) {
+                    continue;
+                }
+                const auto sns = sess->FindPeerSns(ingress.first, ingress.second);
+                if (sns && sns->nodes.contains(node_id)) {
+                    stale.push_back(egress_id);
+                }
+            }
+
+            for (const auto egress_id : stale) {
+                auto stale_it = fib->second.find(egress_id);
+                if (stale_it == fib->second.end()) {
+                    continue;
+                }
+                auto sess = stale_it->second.peer_session.lock();
+                if (!sess) {
+                    if (stale_it->second.streams.empty()) {
+                        fib->second.erase(stale_it);
+                    } else {
+                        stale_it->second.drain = true;
+                    }
+                    continue;
+                }
+
+                bool others{ false };
+                if (const auto sns = sess->FindPeerSns(ingress.first, ingress.second)) {
+                    for (const auto other : sns->nodes) {
+                        if (other == node_id) {
+                            continue;
+                        }
+                        const auto other_best = info_base_->GetBestPeerSession(other).lock();
+                        if (other_best && other_best->GetSessionId() == egress_id) {
+                            others = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (others) {
+                    sess->RemovePeerSnsSourceNode(ingress.first, ingress.second, node_id);
+                    continue;
+                }
+
+                if (stale_it->second.streams.empty()) {
+                    sess->RemovePeerSnsSourceNode(ingress.first, ingress.second, 0);
+                    fib->second.erase(stale_it);
+                } else {
+                    stale_it->second.drain = true;
+                }
+            }
+        }
+    }
+
+    void Engine::ReleaseDrainedClient(std::uint64_t track_hash, PeerSessionId session_id)
+    {
+        auto it = info_base_->client_fib_.find({ track_hash, session_id });
+        if (it == info_base_->client_fib_.end() || !it->second.drain || !it->second.streams.empty()) {
+            return;
+        }
+
+        auto session = it->second.peer_session.lock();
+        std::vector<NodeIdValueType> nodes;
+        if (session) {
+            nodes = session->SubscribeSourceNodes(track_hash);
+        }
+        info_base_->client_fib_.erase(it);
+        for (const auto node : nodes) {
+            session->RemoveSubscribeSourceNode(track_hash, node);
+        }
+    }
+
+    void Engine::ReleaseDrainedPeerEgress(PeerSessionId ingress_id, SubscribeNodeSetId sns, PeerSessionId egress_id)
+    {
+        auto fib = info_base_->peer_fib_.find({ ingress_id, sns });
+        if (fib == info_base_->peer_fib_.end()) {
+            return;
+        }
+        auto it = fib->second.find(egress_id);
+        if (it == fib->second.end() || !it->second.drain || !it->second.streams.empty()) {
+            return;
+        }
+        if (const auto out = it->second.peer_session.lock()) {
+            out->RemovePeerSnsSourceNode(ingress_id, sns, 0);
+        }
+        fib->second.erase(it);
+        if (fib->second.empty()) {
+            info_base_->peer_fib_.erase(fib);
+        }
+    }
+
     void Engine::CloseFibStreams(ForwardingBase::FibEntry& entry)
     {
         const auto peer_sess = entry.peer_session.lock();
@@ -1613,6 +1941,7 @@ namespace moq::peering {
 
         // Close all egress peer streams related to the ingress stream close
         auto it = info_base_->peer_fib_.find({ peer_session_id, sns });
+        std::vector<PeerSessionId> finished_drains;
         if (it != info_base_->peer_fib_.end()) {
             for (auto& [out_peer_sess_id, entry] : it->second) {
                 if (out_peer_sess_id == 0) {
@@ -1628,9 +1957,16 @@ namespace moq::peering {
                     if (auto out_peer_sess = entry.peer_session.lock()) {
                         out_peer_sess->CloseStream(stream_it->second, flag);
                         entry.streams.erase(stream_it);
+                        if (entry.drain && entry.streams.empty()) {
+                            finished_drains.push_back(out_peer_sess_id);
+                        }
                     }
                 }
             }
+        }
+
+        for (const auto egress_id : finished_drains) {
+            ReleaseDrainedPeerEgress(peer_session_id, sns, egress_id);
         }
     }
 

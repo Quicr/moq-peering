@@ -246,6 +246,25 @@ namespace moq::peering {
         return { it->second.id, is_new };
     }
 
+    std::vector<NodeIdValueType> PeerSession::SubscribeSourceNodes(std::uint64_t full_name_hash) const
+    {
+        const auto it = sub_sns_.find(full_name_hash);
+        if (it == sub_sns_.end()) {
+            return {};
+        }
+        return { it->second.nodes.begin(), it->second.nodes.end() };
+    }
+
+    std::optional<SubscribeNodeSet> PeerSession::FindPeerSns(PeerSessionId in_peer_session_id,
+                                                             SubscribeNodeSetId in_sns_id) const
+    {
+        const auto it = peer_sns_.find({ in_peer_session_id, in_sns_id });
+        if (it == peer_sns_.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
     std::pair<SubscribeNodeSetId, bool> PeerSession::AddSubscribeSourceNode(std::uint64_t full_name_hash,
                                                                             NodeIdValueType sub_node_id,
                                                                             uint8_t priority)
@@ -277,14 +296,18 @@ namespace moq::peering {
         if (it != sub_sns_.end()) {
             auto& sns = it->second;
 
-            node_removed = sns.nodes.erase(sub_node_id) ? true : false;
+            node_removed = sns.nodes.erase(sub_node_id) > 0;
 
-            if (sns.nodes.empty()) {
+            if (node_removed && sns.nodes.empty()) {
                 sns_removed = true;
 
                 SendSns(sns, true);
 
                 sub_sns_.erase(it);
+            } else if (node_removed) {
+                // The same SNS id is updated so in-flight streams stay valid and new streams
+                // follow the reduced set.
+                SendSns(sns, false);
             }
         }
 
@@ -308,14 +331,16 @@ namespace moq::peering {
             }
 
             else { // Remove one
-                node_removed = sns.nodes.erase(sub_node_id) ? true : false;
+                node_removed = sns.nodes.erase(sub_node_id) > 0;
 
-                if (sns.nodes.empty()) {
+                if (node_removed && sns.nodes.empty()) {
                     sns_removed = true;
 
                     SendSns(sns, true);
 
                     peer_sns_.erase(it);
+                } else if (node_removed) {
+                    SendSns(sns, false);
                 }
             }
         }
@@ -427,7 +452,7 @@ namespace moq::peering {
         SendControl(announce_info.Serialize(true, withdraw));
     }
 
-    void PeerSession::SendSubscribeInfo(SubscribeInfo& subscribe_info, bool withdraw) const
+    void PeerSession::SendSubscribeInfo(SubscribeInfo& subscribe_info, bool withdraw, bool advance_seq) const
     {
         if (status_ != StatusValue::kConnected || !IsUsable())
             return;
@@ -440,7 +465,8 @@ namespace moq::peering {
           subscribe_info.details.priority,
           subscribe_info.details.new_group_request_id.has_value() ? *subscribe_info.details.new_group_request_id : -1);
 
-        SendControl(subscribe_info.Serialize(true, withdraw, node_info_.id == subscribe_info.track.source_node_id));
+        const bool is_origin = advance_seq && node_info_.id == subscribe_info.track.source_node_id;
+        SendControl(subscribe_info.Serialize(true, withdraw, is_origin));
     }
 
     void PeerSession::SendNodeInfo(const NodeInfo& node_info, bool withdraw) const
@@ -524,23 +550,25 @@ namespace moq::peering {
 
                         if (connect_resp.error == ProtocolError::kNoError) {
                             remote_node_info_ = *connect_resp.node_info;
+
+                            // Connected before node and subscribe sync so the better-path SNS can be
+                            // sent on this session. Sending it while still connecting drops it.
+                            const bool became_connected = status_ != StatusValue::kConnected;
+                            status_ = StatusValue::kConnected;
+                            if (became_connected) {
+                                NoteConnected();
+                            }
+
                             manager_.NodeReceived(GetSessionId(), *connect_resp.node_info, false);
-
+                            if (became_connected) {
+                                manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
+                            }
                             manager_.ForwardingBaseSyncPeer(*this);
-
                         } else {
                             SPDLOG_LOGGER_DEBUG(config_.logger,
                                                 "Connect error response from error: {}",
                                                 static_cast<int>(connect_resp.error));
                         }
-                        const bool became_connected = status_ != StatusValue::kConnected;
-                        status_ = StatusValue::kConnected;
-                        if (became_connected) {
-                            NoteConnected();
-                            manager_.SessionChanged(GetSessionId(), status_, remote_node_info_);
-                        }
-
-                        manager_.ForwardingBaseSyncPeer(*this);
                         break;
                     }
 

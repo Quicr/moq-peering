@@ -5,6 +5,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <vector>
 
 #include "messages/announce_info.h"
 #include "messages/data_header.h"
@@ -89,7 +90,11 @@ namespace moq::peering {
 
         void FinishStream(const std::shared_ptr<QuicStream>& stream);
         void SendNodeInfo(const NodeInfo& node_info, bool withdraw = false) const;
-        void SendSubscribeInfo(SubscribeInfo& subscribe_info, bool withdraw = false) const;
+        /**
+         * @param advance_seq  Origin refreshes must leave the stored sequence unchanged. A new sequence
+         *      is a subscribe update. Syncing an existing subscribe to a new peer is not one.
+         */
+        void SendSubscribeInfo(SubscribeInfo& subscribe_info, bool withdraw = false, bool advance_seq = true) const;
         void SendAnnounceInfo(const AnnounceInfo& announce_info, bool withdraw = false);
         void SendSns(const SubscribeNodeSet& sns, bool withdraw = false) const;
 
@@ -113,6 +118,13 @@ namespace moq::peering {
         std::pair<bool, bool> RemovePeerSnsSourceNode(PeerSessionId in_peer_session_id,
                                                       SubscribeNodeSetId in_sns_id,
                                                       NodeIdValueType sub_node_id);
+
+        /// Subscriber nodes currently named by the subscribe SNS for this track. Empty when there is none.
+        std::vector<NodeIdValueType> SubscribeSourceNodes(std::uint64_t full_name_hash) const;
+
+        /// Egress SNS created for one ingress SNS. Empty when this session has none.
+        std::optional<SubscribeNodeSet> FindPeerSns(PeerSessionId in_peer_session_id,
+                                                    SubscribeNodeSetId in_sns_id) const;
 
         void OnReady();
         void OnTransportClosed();

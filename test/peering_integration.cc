@@ -32,6 +32,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -404,6 +405,56 @@ namespace {
             return app_.received.size();
         }
 
+        PeerAdminResult Add(const std::string& host, uint16_t port) { return node_->AddPeer(host, port); }
+
+        void Send(std::uint64_t track_hash, DataType type, std::uint64_t group_id, std::vector<uint8_t> payload)
+        {
+            auto bytes = std::make_shared<std::vector<uint8_t>>(std::move(payload));
+            node_->SendData(track_hash, 10, 1000, type, group_id, 0, std::move(bytes));
+        }
+
+        void EndGroup(std::uint64_t track_hash, std::uint64_t group_id) { node_->EndSubgroup(track_hash, group_id, 0); }
+
+        std::uint64_t SubscribeTracks(const std::string& contact)
+        {
+            std::uint64_t count = 0;
+            for (const auto& peer : node_->Peers()) {
+                if (peer.identified && peer.contact == contact && peer.status == PeerLinkStatus::kConnected) {
+                    count += peer.subscribe_tracks;
+                }
+            }
+            return count;
+        }
+
+        bool WaitSubscribeTracks(const std::string& contact, std::uint64_t expected, std::chrono::milliseconds timeout)
+        {
+            const auto deadline = std::chrono::steady_clock::now() + timeout;
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (SubscribeTracks(contact) == expected) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            return SubscribeTracks(contact) == expected;
+        }
+
+        bool WaitBytes(std::uint64_t track_hash, std::string_view text, std::chrono::milliseconds timeout)
+        {
+            std::unique_lock lock(app_.mu);
+            return app_.cv.wait_for(lock, timeout, [&] {
+                const auto it = app_.history.find(track_hash);
+                if (it == app_.history.end()) {
+                    return false;
+                }
+                for (const auto& chunk : it->second) {
+                    if (BytesAsText(chunk).find(text) != std::string::npos) {
+                        return true;
+                    }
+                }
+                return false;
+            });
+        }
+
         std::string Debug()
         {
             std::lock_guard lock(app_.mu);
@@ -424,6 +475,7 @@ namespace {
             int peers_down{ 0 };
             std::map<std::uint64_t, std::vector<uint8_t>> published;
             std::map<std::uint64_t, std::vector<uint8_t>> received;
+            std::map<std::uint64_t, std::vector<std::vector<uint8_t>>> history;
             std::vector<TrackName> tracks;
             std::map<std::uint64_t, int> subscribes;
 
@@ -499,6 +551,7 @@ namespace {
                 {
                     std::lock_guard lock(mu);
                     received[track_hash] = *data;
+                    history[track_hash].push_back(*data);
                 }
                 cv.notify_all();
             }
@@ -627,4 +680,50 @@ TEST_CASE("Three relays with a stub exchange publish, subscribe, and data")
     CHECK(parent.SawSubscribe(stub_hash));
     CHECK(parent.SawSubscribe(far_hash));
     CHECK(parent.PayloadCount() == 0);
+}
+
+TEST_CASE("Direct peer takes new streams and leaves the open stream on the chain")
+{
+    // left (publisher) <-- via <-- right (subscriber), then right dials left directly.
+    // The subgroup already open stays on the via. The next subgroup uses the direct peer.
+    // After that subgroup ends, dropping the via leaves the direct subgroup running.
+    const TestIdentity identity;
+
+    Relay left("edge-left", NodeType::kEdge, {}, identity);
+    auto via = std::make_unique<Relay>(
+      "via-mid", NodeType::kVia, std::vector<std::pair<std::string, uint16_t>>{ { "127.0.0.1", left.port() } }, identity);
+    Relay right("edge-right", NodeType::kEdge, { { "127.0.0.1", via->port() } }, identity);
+
+    const auto track = MakeTrack("edge-left", "live");
+    const auto hash = PeerManager::HashTrack(track);
+    Exchange(left, track, Bytes("from-left"), right, MakeTrack("edge-right", "live"), Bytes("from-right"));
+
+    left.Send(hash, DataType::kNewStream, 1, Bytes("g1-a"));
+    REQUIRE_MESSAGE(right.WaitBytes(hash, "g1-a", kWait), "first subgroup did not arrive through the via");
+    left.Send(hash, DataType::kExistingStream, 1, Bytes("g1-b"));
+    REQUIRE_MESSAGE(right.WaitBytes(hash, "g1-b", kWait), "continuation of the first subgroup did not arrive");
+
+    const auto added = right.Add("127.0.0.1", left.port());
+    REQUIRE_MESSAGE(added.ok, added.message);
+    INFO("via tracks " << left.SubscribeTracks("via-mid") << " direct " << left.SubscribeTracks("edge-right"));
+    REQUIRE_MESSAGE(left.WaitSubscribeTracks("edge-right", 1, kWait), "direct peer did not take the new-stream path");
+    REQUIRE_MESSAGE(left.WaitSubscribeTracks("via-mid", 1, kWait), "open subgroup was dropped from the via");
+
+    left.Send(hash, DataType::kExistingStream, 1, Bytes("g1-c"));
+    REQUIRE_MESSAGE(right.WaitBytes(hash, "g1-c", kWait), "open subgroup stopped when the direct peer came up");
+
+    left.Send(hash, DataType::kNewStream, 2, Bytes("g2-a"));
+    REQUIRE_MESSAGE(right.WaitBytes(hash, "g2-a", kWait), "new subgroup did not start on the direct peer");
+
+    left.EndGroup(hash, 1);
+    INFO("after end via " << left.SubscribeTracks("via-mid") << " direct " << left.SubscribeTracks("edge-right"));
+    REQUIRE_MESSAGE(left.WaitSubscribeTracks("via-mid", 0, kWait), "via kept the track after its subgroup ended");
+    REQUIRE_MESSAGE(left.WaitSubscribeTracks("edge-right", 1, kWait), "direct peer lost the track still in progress");
+
+    via.reset();
+
+    left.Send(hash, DataType::kExistingStream, 2, Bytes("g2-b"));
+    REQUIRE_MESSAGE(right.WaitBytes(hash, "g2-b", kWait), "direct subgroup did not survive losing the via");
+    left.Send(hash, DataType::kNewStream, 3, Bytes("g3-a"));
+    REQUIRE_MESSAGE(right.WaitBytes(hash, "g3-a", kWait), "subgroup started after the via was gone did not arrive");
 }
