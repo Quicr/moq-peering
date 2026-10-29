@@ -147,7 +147,8 @@ namespace moq::peering {
         std::set<std::pair<std::string, std::uint16_t>> inbound_redial_;
         /// Redials waiting for the check thread, so a close callback does not dial inline.
         std::vector<std::pair<std::string, std::uint16_t>> pending_dials_;
-        PeerSessionId next_placeholder_{ std::numeric_limits<PeerSessionId>::max() };
+        // Parentheses stop a Windows max macro from rewriting this call.
+        PeerSessionId next_placeholder_{ (std::numeric_limits<PeerSessionId>::max)() };
 
         std::shared_ptr<QuicEndpoint> server_endpoint_;
         std::thread check_thr_;

@@ -12,6 +12,14 @@
 #include <utility>
 #include <vector>
 
+// picoquic pulls in Winsock. Without this, windows.h defines min and max macros
+// and breaks std::min, std::max, and numeric_limits::max().
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 #include <picoquic.h>
 #include <picoquic_packet_loop.h>
 
