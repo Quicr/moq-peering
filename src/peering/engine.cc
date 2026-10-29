@@ -113,11 +113,14 @@ namespace moq::peering {
                 MoveSubscriberToBest(node_info.id);
             }
         } else {
-            info_base_->RemoveNode(peer_session_id, node_info.id);
-
-            auto adv_node_info = node_info;
-            adv_node_info.path.push_back({ peer_session->node_info_.id, peer_session->metrics_.srtt_us });
-            PropagateNodeInfo(adv_node_info, true);
+            // Forward the withdraw only when this was the last path. Another session may still
+            // reach the node, and repeating the withdraw would erase that route.
+            const bool still_reachable = info_base_->RemoveNode(peer_session_id, node_info.id);
+            if (!still_reachable) {
+                auto adv_node_info = node_info;
+                adv_node_info.path.push_back({ peer_session->node_info_.id, peer_session->metrics_.srtt_us });
+                PropagateNodeInfo(adv_node_info, true);
+            }
         }
     } catch (const std::exception&) {
         SPDLOG_LOGGER_DEBUG(LOGGER,
@@ -412,14 +415,29 @@ namespace moq::peering {
 
                 PropagateNodeInfo(remote_node_info, true);
 
-                // Tracks this session was forwarding. Captured before purge deletes the entries, then
-                // repathed against the best session that remains.
-                std::set<std::uint64_t> forwarded_tracks;
+                // Identify the session by pointer. A dialer drops its QUIC connection before this
+                // runs, so GetSessionId() is already 0 and cannot be matched against the tables.
+                std::shared_ptr<PeerSession> dying;
                 {
+                    std::lock_guard lock(mutex_);
+                    if (const auto it = server_peer_sessions_.find(peer_session_id);
+                        it != server_peer_sessions_.end()) {
+                        dying = it->second;
+                    } else if (const auto it = client_peer_sessions_.find(peer_session_id);
+                               it != client_peer_sessions_.end()) {
+                        dying = it->second;
+                    }
+                }
+
+                // Nodes whose next hop was this session. Captured before purge selects the
+                // remaining path. A subscriber still reached through another session keeps the
+                // subscribe; the next subgroup uses that session.
+                std::set<NodeIdValueType> was_best;
+                if (dying) {
                     std::lock_guard lock(info_base_->mutex_);
-                    for (const auto& entry : info_base_->client_fib_) {
-                        if (entry.first.second == peer_session_id) {
-                            forwarded_tracks.insert(entry.first.first);
+                    for (const auto& [node_id, weak] : info_base_->nodes_best_) {
+                        if (const auto session = weak.lock(); session && session == dying) {
+                            was_best.insert(node_id);
                         }
                     }
                 }
@@ -428,42 +446,30 @@ namespace moq::peering {
                 if (!stop_)
                     gone = info_base_->PurgePeerSessionInfo(peer_session_id);
 
-                // Remove or find new best peer for subscribe info
                 std::vector<SubscribeInfo> remove_sub;
-                std::vector<std::pair<PeerSessionId, SubscribeInfo>> update_sub;
-
-                std::unique_lock ib_lock(info_base_->mutex_);
-                for (const auto& [_, by_source] : info_base_->subscribes_) {
-                    for (const auto& [source_id, si] : by_source) {
-                        const bool source_gone = source_id == remote_node_info.id ||
-                                                 std::find(gone.begin(), gone.end(), source_id) != gone.end();
-                        if (source_gone) {
-                            remove_sub.emplace_back(si);
-                            continue;
-                        }
-
-                        const auto track_hash = si.details.track_hash.track_fullname_hash;
-                        if (!forwarded_tracks.contains(track_hash)) {
-                            continue;
-                        }
-
-                        // Same recursive mutex. Keep it held so `si` cannot be freed by another peering thread.
-                        const auto best_peer = info_base_->GetBestPeerSession(si.track.source_node_id);
-                        if (const auto peer_sess = best_peer.lock()) {
-                            update_sub.emplace_back(peer_sess->GetSessionId(), si);
-                        } else {
-                            remove_sub.emplace_back(si);
+                {
+                    std::lock_guard lock(info_base_->mutex_);
+                    for (const auto& [_, by_source] : info_base_->subscribes_) {
+                        for (const auto& [source_id, si] : by_source) {
+                            if (std::find(gone.begin(), gone.end(), source_id) != gone.end()) {
+                                remove_sub.emplace_back(si);
+                            }
                         }
                     }
                 }
-                ib_lock.unlock();
 
                 for (auto& si : remove_sub) {
                     SubscribeInfoReceived(peer_session_id, si, true);
                 }
 
-                for (auto& [id, si] : update_sub) {
-                    SubscribeInfoReceived(id, si, false);
+                for (const auto node_id : was_best) {
+                    if (node_id == node_info_.id || node_id == 0) {
+                        continue;
+                    }
+                    if (std::find(gone.begin(), gone.end(), node_id) != gone.end()) {
+                        continue;
+                    }
+                    MoveSubscriberToBest(node_id);
                 }
 
                 if (!gone.empty()) {

@@ -40,7 +40,9 @@ namespace moq::peering {
         /**
          * @brief Remove node from the info base
          */
-        void RemoveNode(PeerSessionId peer_session_id, NodeIdValueType node_id);
+        /// Drops the path to `node_id` learned on `peer_session_id`. Returns true when another
+        /// session still reaches that node.
+        bool RemoveNode(PeerSessionId peer_session_id, NodeIdValueType node_id);
 
         /**
          * @brief Purge peer session information

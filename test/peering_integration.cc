@@ -407,6 +407,8 @@ namespace {
 
         PeerAdminResult Add(const std::string& host, uint16_t port) { return node_->AddPeer(host, port); }
 
+        PeerAdminResult Remove(const std::string& host, uint16_t port) { return node_->RemovePeer(host, port); }
+
         void Send(std::uint64_t track_hash, DataType type, std::uint64_t group_id, std::vector<uint8_t> payload)
         {
             auto bytes = std::make_shared<std::vector<uint8_t>>(std::move(payload));
@@ -426,6 +428,17 @@ namespace {
             return count;
         }
 
+        std::uint64_t Publishes(const std::string& contact)
+        {
+            std::uint64_t count = 0;
+            for (const auto& peer : node_->Peers()) {
+                if (peer.identified && peer.contact == contact && peer.status == PeerLinkStatus::kConnected) {
+                    count += peer.publishes;
+                }
+            }
+            return count;
+        }
+
         bool WaitSubscribeTracks(const std::string& contact, std::uint64_t expected, std::chrono::milliseconds timeout)
         {
             const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -436,6 +449,18 @@ namespace {
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
             return SubscribeTracks(contact) == expected;
+        }
+
+        bool WaitBothWays(const std::string& contact, std::chrono::milliseconds timeout)
+        {
+            const auto deadline = std::chrono::steady_clock::now() + timeout;
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (SubscribeTracks(contact) >= 1 && Publishes(contact) >= 1) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            return SubscribeTracks(contact) >= 1 && Publishes(contact) >= 1;
         }
 
         bool WaitBytes(std::uint64_t track_hash, std::string_view text, std::chrono::milliseconds timeout)
@@ -726,4 +751,49 @@ TEST_CASE("Direct peer takes new streams and leaves the open stream on the chain
     REQUIRE_MESSAGE(right.WaitBytes(hash, "g2-b", kWait), "direct subgroup did not survive losing the via");
     left.Send(hash, DataType::kNewStream, 3, Bytes("g3-a"));
     REQUIRE_MESSAGE(right.WaitBytes(hash, "g3-a", kWait), "subgroup started after the via was gone did not arrive");
+}
+
+TEST_CASE("Removing the direct peer sends the next subgroup both ways through the via")
+{
+    // left <-- via <-- right, then right dials left. After the direct path is the only one
+    // carrying each track, removing it must send the next subgroup both ways through the via.
+    const TestIdentity identity;
+
+    Relay left("edge-left", NodeType::kEdge, {}, identity);
+    Relay via(
+      "via-mid", NodeType::kVia, std::vector<std::pair<std::string, uint16_t>>{ { "127.0.0.1", left.port() } }, identity);
+    Relay right("edge-right", NodeType::kEdge, { { "127.0.0.1", via.port() } }, identity);
+
+    const auto left_track = MakeTrack("edge-left", "live");
+    const auto right_track = MakeTrack("edge-right", "live");
+    const auto left_hash = PeerManager::HashTrack(left_track);
+    const auto right_hash = PeerManager::HashTrack(right_track);
+    Exchange(left, left_track, Bytes("from-left"), right, right_track, Bytes("from-right"));
+
+    const auto added = right.Add("127.0.0.1", left.port());
+    REQUIRE_MESSAGE(added.ok, added.message);
+    REQUIRE_MESSAGE(left.WaitSubscribeTracks("edge-right", 1, kWait), "left did not move its track onto the direct peer");
+    REQUIRE_MESSAGE(left.WaitSubscribeTracks("via-mid", 0, kWait), "left kept its track on the via after the direct peer");
+    REQUIRE_MESSAGE(right.WaitSubscribeTracks("edge-left", 1, kWait), "right did not move its track onto the direct peer");
+    REQUIRE_MESSAGE(right.WaitSubscribeTracks("via-mid", 0, kWait), "right kept its track on the via after the direct peer");
+
+    left.Send(left_hash, DataType::kNewStream, 1, Bytes("left-direct"));
+    right.Send(right_hash, DataType::kNewStream, 1, Bytes("right-direct"));
+    REQUIRE_MESSAGE(right.WaitBytes(left_hash, "left-direct", kWait), "left subgroup did not arrive on the direct peer");
+    REQUIRE_MESSAGE(left.WaitBytes(right_hash, "right-direct", kWait), "right subgroup did not arrive on the direct peer");
+
+    const int left_down = left.PeersDown();
+    const auto removed = right.Remove("127.0.0.1", left.port());
+    REQUIRE_MESSAGE(removed.ok, removed.message);
+    REQUIRE_MESSAGE(left.WaitPeersDown(left_down + 1, kWait), "left did not observe the direct peer close");
+
+    REQUIRE_MESSAGE(left.WaitSubscribeTracks("via-mid", 1, kWait), "left did not move the next subgroup onto the via");
+    REQUIRE_MESSAGE(right.WaitSubscribeTracks("via-mid", 1, kWait), "right did not move the next subgroup onto the via");
+    REQUIRE_MESSAGE(via.WaitBothWays("edge-left", kWait), "via is not forwarding both ways with left");
+    REQUIRE_MESSAGE(via.WaitBothWays("edge-right", kWait), "via is not forwarding both ways with right");
+
+    left.Send(left_hash, DataType::kNewStream, 2, Bytes("left-via"));
+    right.Send(right_hash, DataType::kNewStream, 2, Bytes("right-via"));
+    REQUIRE_MESSAGE(right.WaitBytes(left_hash, "left-via", kWait), "left subgroup did not fall back through the via");
+    REQUIRE_MESSAGE(left.WaitBytes(right_hash, "right-via", kWait), "right subgroup did not fall back through the via");
 }

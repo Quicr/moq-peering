@@ -23,7 +23,7 @@ namespace moq::peering {
         return SelectBestNode(node_info.id);
     }
 
-    void ForwardingBase::RemoveNode(PeerSessionId peer_session_id, NodeIdValueType node_id)
+    bool ForwardingBase::RemoveNode(PeerSessionId peer_session_id, NodeIdValueType node_id)
     {
         std::lock_guard _(mutex_);
 
@@ -42,6 +42,13 @@ namespace moq::peering {
             SelectBestNode(node_id);
             // TODO(tievens): Update subscribes and announces based on best change
         }
+
+        for (const auto& entry : nodes_) {
+            if (entry.first.first == node_id) {
+                return true;
+            }
+        }
+        return false;
     }
 
     std::vector<NodeIdValueType> ForwardingBase::PurgePeerSessionInfo(PeerSessionId peer_session_id)
