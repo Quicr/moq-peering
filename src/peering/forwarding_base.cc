@@ -379,18 +379,26 @@ namespace moq::peering {
 
             SPDLOG_DEBUG("Forwarding Table Dump BEGIN ------------------------------");
 
-            // DEBUG - Dump the best nodes and their peering sessions to reach them
+            // A removed peer drops its QUIC connection before this runs, so its session id is
+            // already 0 and no longer matches the table key. Skip those rows. nodes_.at() would
+            // throw and skip moving subscribers onto the path that remains.
             for (const auto& node : nodes_best_) {
-                auto node_info = node.second.lock();
-                auto node_item = nodes_.at({ node.first, node_info->GetSessionId() });
+                const auto session = node.second.lock();
+                if (!session) {
+                    continue;
+                }
+                const auto node_item = nodes_.find({ node.first, session->GetSessionId() });
+                if (node_item == nodes_.end()) {
+                    continue;
+                }
                 SPDLOG_DEBUG("Forwarding table node id: {} contact {} best via peer_session id: {} contact: {} "
                              "path_len: {} sum_srtt: {}",
                              NodeId().Value(node.first),
-                             node_item.node_info.contact,
-                             node_info->GetSessionId(),
-                             node_info->remote_node_info_.contact,
-                             node_item.node_info.path.size(),
-                             node_item.node_info.SumSrtt());
+                             node_item->second.node_info.contact,
+                             session->GetSessionId(),
+                             session->remote_node_info_.contact,
+                             node_item->second.node_info.path.size(),
+                             node_item->second.node_info.SumSrtt());
             }
             SPDLOG_DEBUG("Forwarding Table Dump DONE ------------------------------");
         }

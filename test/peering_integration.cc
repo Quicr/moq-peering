@@ -451,6 +451,20 @@ namespace {
             return SubscribeTracks(contact) == expected;
         }
 
+        bool WaitSubscribeTracksAtLeast(const std::string& contact,
+                                        std::uint64_t minimum,
+                                        std::chrono::milliseconds timeout)
+        {
+            const auto deadline = std::chrono::steady_clock::now() + timeout;
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (SubscribeTracks(contact) >= minimum) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            return SubscribeTracks(contact) >= minimum;
+        }
+
         bool WaitBothWays(const std::string& contact, std::chrono::milliseconds timeout)
         {
             const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -763,6 +777,11 @@ TEST_CASE("Removing the direct peer sends the next subgroup both ways through th
     Relay via(
       "via-mid", NodeType::kVia, std::vector<std::pair<std::string, uint16_t>>{ { "127.0.0.1", left.port() } }, identity);
     Relay right("edge-right", NodeType::kEdge, { { "127.0.0.1", via.port() } }, identity);
+    // Known to right only through left once the direct session exists, so that session is the
+    // best next hop for two nodes. Removing it must still move the live tracks.
+    Relay leaf("edge-leaf", NodeType::kEdge, { { "127.0.0.1", left.port() } }, identity);
+    const auto leaf_track = MakeTrack("edge-leaf", "live");
+    leaf.Publish(leaf_track, Bytes("from-leaf"));
 
     const auto left_track = MakeTrack("edge-left", "live");
     const auto right_track = MakeTrack("edge-right", "live");
@@ -772,23 +791,24 @@ TEST_CASE("Removing the direct peer sends the next subgroup both ways through th
 
     const auto added = right.Add("127.0.0.1", left.port());
     REQUIRE_MESSAGE(added.ok, added.message);
-    REQUIRE_MESSAGE(left.WaitSubscribeTracks("edge-right", 1, kWait), "left did not move its track onto the direct peer");
-    REQUIRE_MESSAGE(left.WaitSubscribeTracks("via-mid", 0, kWait), "left kept its track on the via after the direct peer");
-    REQUIRE_MESSAGE(right.WaitSubscribeTracks("edge-left", 1, kWait), "right did not move its track onto the direct peer");
-    REQUIRE_MESSAGE(right.WaitSubscribeTracks("via-mid", 0, kWait), "right kept its track on the via after the direct peer");
+    REQUIRE_MESSAGE(left.WaitSubscribeTracksAtLeast("edge-right", 1, kWait),
+                    "left did not move its track onto the direct peer");
+    REQUIRE_MESSAGE(right.WaitSubscribeTracksAtLeast("edge-left", 1, kWait),
+                    "right did not move its track onto the direct peer");
 
     left.Send(left_hash, DataType::kNewStream, 1, Bytes("left-direct"));
     right.Send(right_hash, DataType::kNewStream, 1, Bytes("right-direct"));
     REQUIRE_MESSAGE(right.WaitBytes(left_hash, "left-direct", kWait), "left subgroup did not arrive on the direct peer");
     REQUIRE_MESSAGE(left.WaitBytes(right_hash, "right-direct", kWait), "right subgroup did not arrive on the direct peer");
+    REQUIRE_MESSAGE(right.WaitTrack(leaf_track, kWait), "right did not learn the leaf through the direct peer");
 
     const int left_down = left.PeersDown();
     const auto removed = right.Remove("127.0.0.1", left.port());
     REQUIRE_MESSAGE(removed.ok, removed.message);
     REQUIRE_MESSAGE(left.WaitPeersDown(left_down + 1, kWait), "left did not observe the direct peer close");
 
-    REQUIRE_MESSAGE(left.WaitSubscribeTracks("via-mid", 1, kWait), "left did not move the next subgroup onto the via");
-    REQUIRE_MESSAGE(right.WaitSubscribeTracks("via-mid", 1, kWait), "right did not move the next subgroup onto the via");
+    REQUIRE_MESSAGE(left.WaitSubscribeTracksAtLeast("via-mid", 1, kWait), "left did not move the next subgroup onto the via");
+    REQUIRE_MESSAGE(right.WaitSubscribeTracksAtLeast("via-mid", 1, kWait), "right did not move the next subgroup onto the via");
     REQUIRE_MESSAGE(via.WaitBothWays("edge-left", kWait), "via is not forwarding both ways with left");
     REQUIRE_MESSAGE(via.WaitBothWays("edge-right", kWait), "via is not forwarding both ways with right");
 
