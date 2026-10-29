@@ -54,14 +54,15 @@ jobs:
               ;;
             Windows)
               # picotls calls find_package(PkgConfig REQUIRED) before optional brotli.
-              # cmake/pkg-config.cmd satisfies that check. Chocolatey's pkgconfiglite
-              # package is not used: its feed returns 504 and the install step still exits 0.
-              pkg_config=$(cygpath -m "${GITHUB_WORKSPACE}/cmake/pkg-config.cmd")
+              # CMake runs a .cmd through cmd.exe, which treats D:/a/... as a switch, so
+              # the stub is a PowerShell script launched by powershell.exe instead.
+              pkg_config=$(cygpath -m "${GITHUB_WORKSPACE}/cmake/pkg-config.ps1")
               args+=(
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake"
                 -DVCPKG_TARGET_TRIPLET=x64-windows-release
                 -DVCPKG_OVERLAY_TRIPLETS="${GITHUB_WORKSPACE}/cmake/triplets"
-                "-DPKG_CONFIG_EXECUTABLE=${pkg_config}"
+                -DPKG_CONFIG_EXECUTABLE=C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+                "-DPKG_CONFIG_ARGN=-NoProfile;-NonInteractive;-ExecutionPolicy;Bypass;-File;${pkg_config}"
               )
               ;;
           esac
