@@ -225,6 +225,10 @@ namespace moq::peering {
 
         /// Tracks arriving from the peer that this relay is forwarding onward.
         std::uint64_t publishes{ 0 };
+
+        /// QUIC streams currently open on this session. The control stream, object streams received
+        /// from the peer, and object streams this relay has opened toward the peer.
+        std::uint64_t active_streams{ 0 };
     };
 
     /// Result of an admin add, remove, restart, or metric change for one peer address.

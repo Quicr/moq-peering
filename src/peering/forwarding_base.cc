@@ -472,6 +472,7 @@ namespace moq::peering {
                 continue;
             }
             counts[session_id].subscribe_tracks++;
+            counts[session_id].active_streams += entry.second.streams.size();
         }
 
         // Objects received from a peer and sent on to another peer or to a local subscriber.
@@ -492,6 +493,7 @@ namespace moq::peering {
                     continue;
                 }
                 counts[egress_id].subscribe_tracks++;
+                counts[egress_id].active_streams += egress_entry.second.streams.size();
             }
         }
 

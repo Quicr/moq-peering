@@ -648,37 +648,36 @@ namespace moq::peering {
             // Opening the egress stream has to run on that connection's packet thread. Doing it
             // from the ingress thread and waiting deadlocks when the egress thread is forwarding
             // the other direction back here.
-            session->OnConnectionThread(
-              [this, peer_session_id, data_header, eflags, step = std::move(step)]() mutable {
-                  if (step.open_stream) {
-                      auto opened = step.session->CreateStream(data_header.priority);
-                      std::shared_ptr<QuicStream> discard;
-                      {
-                          std::lock_guard lock(info_base_->mutex_);
-                          const auto fib = info_base_->peer_fib_.find({ peer_session_id, data_header.sns_id });
-                          if (fib == info_base_->peer_fib_.end() || opened == nullptr) {
-                              discard = std::move(opened);
-                          } else if (const auto entry = fib->second.find(step.egress_id); entry == fib->second.end()) {
-                              discard = std::move(opened);
-                          } else {
-                              const auto [inserted_it, inserted] = entry->second.streams.try_emplace(step.key, opened);
-                              if (!inserted) {
-                                  discard = std::move(opened);
-                              }
-                              step.stream = inserted_it->second;
-                          }
-                      }
-                      if (discard) {
-                          step.session->CloseStream(discard, StreamClose::kReset);
-                      }
-                      if (step.stream == nullptr) {
-                          return;
-                      }
-                  }
+            session->OnConnectionThread([this, peer_session_id, data_header, eflags, step = std::move(step)]() mutable {
+                if (step.open_stream) {
+                    auto opened = step.session->CreateStream(data_header.priority);
+                    std::shared_ptr<QuicStream> discard;
+                    {
+                        std::lock_guard lock(info_base_->mutex_);
+                        const auto fib = info_base_->peer_fib_.find({ peer_session_id, data_header.sns_id });
+                        if (fib == info_base_->peer_fib_.end() || opened == nullptr) {
+                            discard = std::move(opened);
+                        } else if (const auto entry = fib->second.find(step.egress_id); entry == fib->second.end()) {
+                            discard = std::move(opened);
+                        } else {
+                            const auto [inserted_it, inserted] = entry->second.streams.try_emplace(step.key, opened);
+                            if (!inserted) {
+                                discard = std::move(opened);
+                            }
+                            step.stream = inserted_it->second;
+                        }
+                    }
+                    if (discard) {
+                        step.session->CloseStream(discard, StreamClose::kReset);
+                    }
+                    if (step.stream == nullptr) {
+                        return;
+                    }
+                }
 
-                  step.session->SendData(
-                    data_header.priority, data_header.ttl, step.stream, eflags, std::move(step.data));
-              });
+                step.session->SendData(
+                  data_header.priority, data_header.ttl, step.stream, eflags, std::move(step.data));
+            });
         }
     }
 
@@ -1713,6 +1712,7 @@ namespace moq::peering {
             if (const auto it = forwarding.find(peer.session_id); it != forwarding.end()) {
                 peer.subscribe_tracks = it->second.subscribe_tracks;
                 peer.publishes = it->second.publishes;
+                peer.active_streams += it->second.active_streams;
             }
             peers.push_back(std::move(peer));
         }
@@ -1806,8 +1806,7 @@ namespace moq::peering {
             return;
         }
 
-        const auto [sns_id, is_new] =
-          best->AddSubscribeSourceNode(track_hash, node_id, si->second.details.priority);
+        const auto [sns_id, is_new] = best->AddSubscribeSourceNode(track_hash, node_id, si->second.details.priority);
         auto [fib_it, inserted] = info_base_->client_fib_.try_emplace(
           { track_hash, best->GetSessionId() },
           ForwardingBase::FibEntry{ static_cast<uint64_t>(std::rand()), {}, sns_id, best_weak });
@@ -2338,9 +2337,7 @@ namespace moq::peering {
         }
     }
 
-    PeerAdminResult Engine::AddPeer(const std::string& host,
-                                    std::uint16_t port,
-                                    std::optional<std::uint64_t> metric)
+    PeerAdminResult Engine::AddPeer(const std::string& host, std::uint16_t port, std::optional<std::uint64_t> metric)
     {
         const auto address = StripHostBrackets(host);
         PeerAdminResult result;

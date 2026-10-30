@@ -145,13 +145,15 @@ namespace moq::peering {
          * @brief Tracks currently forwarded on each peering session
          *
          * @details subscribe_tracks counts tracks this relay is sending to that session. publishes
-         *      counts tracks arriving from that session that are forwarded onward. Session id 0 is
+         *      counts tracks arriving from that session that are forwarded onward. active_streams counts
+         *      object streams this relay currently holds open toward that session. Session id 0 is
          *      the local client path and is omitted.
          */
         struct SessionForwardingCounts
         {
             std::uint64_t subscribe_tracks{ 0 };
             std::uint64_t publishes{ 0 };
+            std::uint64_t active_streams{ 0 };
         };
 
         std::map<PeerSessionId, SessionForwardingCounts> ForwardingCountsBySession() const;

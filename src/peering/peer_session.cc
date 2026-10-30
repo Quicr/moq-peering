@@ -111,7 +111,14 @@ namespace moq::peering {
         peer.metric = session_metric_.load();
         peer.node_metric = AdvertisedMetric();
         peer.connect_time_us = status_ == StatusValue::kConnected ? metrics_.connect_time_us : 0;
+        peer.active_streams = OpenLocalStreams();
         return peer;
+    }
+
+    std::uint64_t PeerSession::OpenLocalStreams() const
+    {
+        const auto control = control_stream_open_.load() ? std::uint64_t{ 1 } : std::uint64_t{ 0 };
+        return control + open_rx_streams_.load();
     }
 
     std::uint64_t PeerSession::AdvertisedMetric() const
@@ -169,6 +176,8 @@ namespace moq::peering {
         controL_msg_buffer_.clear();
         control_stream_.reset();
         control_stream_id_.reset();
+        control_stream_open_.store(false);
+        open_rx_streams_.store(0);
     }
 
     void PeerSession::ForgetIngress(PeerSessionId peer_session_id)
@@ -202,6 +211,8 @@ namespace moq::peering {
         connection_closed_ = false;
         control_stream_ = nullptr;
         control_stream_id_.reset();
+        control_stream_open_.store(false);
+        open_rx_streams_.store(0);
 
         peer_sns_.clear();
         rx_stream_headers_.clear();
@@ -753,6 +764,7 @@ namespace moq::peering {
         control_stream_ = connection_->OpenBidirectional(0);
         if (control_stream_) {
             control_stream_id_ = control_stream_->id;
+            control_stream_open_.store(true);
         }
         SendConnect();
     }
@@ -785,6 +797,7 @@ namespace moq::peering {
             control_stream_->id = stream_id;
             control_stream_->bidirectional = true;
             control_stream_id_ = stream_id;
+            control_stream_open_.store(true);
 
             if (!data.empty()) {
                 controL_msg_buffer_.insert(controL_msg_buffer_.end(), data.begin(), data.end());
@@ -800,6 +813,9 @@ namespace moq::peering {
         }
 
         std::shared_ptr<std::vector<uint8_t>> payload;
+        if (!rx_stream_headers_.contains(stream_id) && !rx_pending_.contains(stream_id)) {
+            open_rx_streams_.fetch_add(1);
+        }
         if (!rx_stream_headers_.contains(stream_id)) {
             auto& pending = rx_pending_[stream_id];
             pending.insert(pending.end(), data.begin(), data.end());
@@ -839,14 +855,17 @@ namespace moq::peering {
     void PeerSession::OnStreamClosed(uint64_t stream_id, StreamClose flag)
     {
         const auto conn_id = GetSessionId();
-        rx_pending_.erase(stream_id);
+        const bool had_pending = rx_pending_.erase(stream_id) != 0;
 
         if (control_stream_ != nullptr && control_stream_id_.has_value() && *control_stream_id_ == stream_id) {
             control_stream_ = nullptr;
             control_stream_id_.reset();
+            control_stream_open_.store(false);
         }
 
+        bool had_header = false;
         if (const auto header_it = rx_stream_headers_.find(stream_id); header_it != rx_stream_headers_.end()) {
+            had_header = true;
             const auto& data_header = header_it->second;
 
             SPDLOG_LOGGER_DEBUG(LOGGER,
@@ -859,12 +878,16 @@ namespace moq::peering {
 
             rx_stream_headers_.erase(header_it);
 
-        } else {
+        } else if (!had_pending) {
             SPDLOG_LOGGER_DEBUG(LOGGER,
                                 "Peer conn_id {} stream id: {} flag: {} closed without having existing state",
                                 conn_id,
                                 stream_id,
                                 static_cast<int>(flag));
+        }
+
+        if ((had_pending || had_header) && open_rx_streams_.load() > 0) {
+            open_rx_streams_.fetch_sub(1);
         }
     }
 

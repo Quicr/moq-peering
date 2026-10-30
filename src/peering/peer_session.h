@@ -73,6 +73,9 @@ namespace moq::peering {
         /// Identity, role, status, and a fresh smoothed RTT.
         PeerSnapshot Snapshot();
 
+        /// Control stream plus object streams received from this peer that have not closed.
+        std::uint64_t OpenLocalStreams() const;
+
         /// Metric configured for this session. Zero when none was set.
         std::uint64_t SessionMetric() const { return session_metric_.load(); }
 
@@ -210,6 +213,9 @@ namespace moq::peering {
 
         std::shared_ptr<QuicStream> control_stream_;
         std::optional<std::uint64_t> control_stream_id_;
+        std::atomic<bool> control_stream_open_{ false };
+        /// Object streams received from this peer that have not closed.
+        std::atomic<std::uint64_t> open_rx_streams_{ 0 };
         std::vector<uint8_t> controL_msg_buffer_;
         std::map<std::uint64_t, DataHeader> rx_stream_headers_;
         std::map<std::uint64_t, std::vector<uint8_t>> rx_pending_;
