@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <span>
 #include <thread>
@@ -100,15 +101,23 @@ namespace moq::peering {
         /// Numeric node id assigned from the configured node id. Immutable after construction.
         std::uint64_t LocalNodeId() const { return node_info_.id; }
 
-        PeerAdminResult AddPeer(const std::string& host, std::uint16_t port);
+        PeerAdminResult AddPeer(const std::string& host,
+                                std::uint16_t port,
+                                std::optional<std::uint64_t> metric = std::nullopt);
         PeerAdminResult RemovePeer(const std::string& host, std::uint16_t port);
         PeerAdminResult RestartPeer(const std::string& host, std::uint16_t port);
+        PeerAdminResult SetPeerMetric(const std::string& host, std::uint16_t port, std::uint64_t metric);
 
       private:
         void NewPeerConnection(const std::shared_ptr<QuicConnection>& connection);
         void PeerConnectionClosed(uint64_t session_id);
         void CheckThread(int interval_ms);
-        bool CreatePeerSession(const std::string& host, uint16_t port);
+        bool CreatePeerSession(const std::string& host,
+                               uint16_t port,
+                               std::optional<std::uint64_t> metric = std::nullopt);
+        void UpdateSessionMetric(const std::shared_ptr<PeerSession>& session, std::uint64_t metric);
+        /// Caller holds mutex_. Sends stored nodes, appending this session's path metric.
+        void SendKnownNodes(PeerSession& peer_session);
 
         struct LocatedPeer
         {
@@ -164,10 +173,18 @@ namespace moq::peering {
         std::map<PeerSessionId, std::shared_ptr<PeerSession>> server_peer_sessions_;
         std::map<PeerSessionId, std::shared_ptr<PeerSession>> client_peer_sessions_;
 
-        /// Accepted peers to dial if their inbound session closes. The port is the dial port.
-        std::set<std::pair<std::string, std::uint16_t>> inbound_redial_;
+        /// Accepted peers to dial if their inbound session closes. The value is the session metric.
+        std::map<std::pair<std::string, std::uint16_t>, std::optional<std::uint64_t>> inbound_redial_;
+
+        struct PendingDial
+        {
+            std::string host;
+            std::uint16_t port{ 0 };
+            std::optional<std::uint64_t> metric;
+        };
+
         /// Redials waiting for the check thread, so a close callback does not dial inline.
-        std::vector<std::pair<std::string, std::uint16_t>> pending_dials_;
+        std::vector<PendingDial> pending_dials_;
         // Parentheses stop a Windows max macro from rewriting this call.
         PeerSessionId next_placeholder_{ (std::numeric_limits<PeerSessionId>::max)() };
 

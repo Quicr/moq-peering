@@ -108,8 +108,36 @@ namespace moq::peering {
             peer.node_type = remote_node_info_.type;
         }
         peer.srtt_us = metrics_.srtt_us;
+        peer.metric = session_metric_;
+        peer.node_metric = AdvertisedMetric();
         peer.connect_time_us = status_ == StatusValue::kConnected ? metrics_.connect_time_us : 0;
         return peer;
+    }
+
+    std::uint64_t PeerSession::AdvertisedMetric() const
+    {
+        if (session_metric_ > node_info_.metric) {
+            return session_metric_;
+        }
+        return node_info_.metric;
+    }
+
+    NodeInfo PeerSession::LocalNodeAdvertisement() const
+    {
+        auto info = node_info_;
+        info.metric = AdvertisedMetric();
+        info.path.clear();
+        return info;
+    }
+
+    NodePathItem PeerSession::ForwardPathItem() const
+    {
+        return { node_info_.id, metrics_.srtt_us, AdvertisedMetric() };
+    }
+
+    void PeerSession::SetSessionMetric(std::uint64_t metric)
+    {
+        session_metric_ = metric;
     }
 
     void PeerSession::MarkDisconnected()
@@ -482,7 +510,7 @@ namespace moq::peering {
     {
         peering::Connect connect;
         connect.mode = PeerMode::kBoth;
-        connect.node_info = node_info_;
+        connect.node_info = LocalNodeAdvertisement();
 
         peer_sns_.clear();
 
@@ -495,7 +523,7 @@ namespace moq::peering {
     {
         ConnectResponse connect_resp;
         connect_resp.error = ProtocolError::kNoError;
-        connect_resp.node_info = node_info_;
+        connect_resp.node_info = LocalNodeAdvertisement();
         SPDLOG_LOGGER_DEBUG(LOGGER, "Sending connect ok length: {}", connect_resp.Serialize().size());
 
         SendControl(connect_resp.Serialize());

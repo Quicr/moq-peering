@@ -4,6 +4,8 @@
 #include "node_info.h"
 #include "peering/uintvar.h"
 
+#include <iterator>
+
 namespace moq::peering {
 
     uint64_t NodeInfo::SumSrtt() const
@@ -16,10 +18,20 @@ namespace moq::peering {
         return sum;
     }
 
+    uint64_t NodeInfo::SumMetric() const
+    {
+        uint64_t sum = metric;
+        for (const auto& item : path) {
+            sum += item.metric;
+        }
+
+        return sum;
+    }
+
     uint32_t NodeInfo::SizeBytes() const
     {
         return sizeof(id) + sizeof(type) + UintVar(contact.size()).Size() + contact.size() + sizeof(longitude) +
-               sizeof(latitude) + (path.size() * sizeof(NodePathItem));
+               sizeof(latitude) + sizeof(metric) + (path.size() * sizeof(NodePathItem));
     }
 
     NodeInfo::NodeInfo(std::span<uint8_t const> serialized_data)
@@ -42,6 +54,12 @@ namespace moq::peering {
 
         latitude = ValueOf<double>({ it, it + 8 });
         it += 8;
+
+        if (static_cast<std::size_t>(std::distance(it, serialized_data.end())) < sizeof(metric)) {
+            throw std::runtime_error("node info missing metric");
+        }
+        metric = ValueOf<uint64_t>({ it, it + static_cast<std::ptrdiff_t>(sizeof(metric)) });
+        it += static_cast<std::ptrdiff_t>(sizeof(metric));
 
         NodePathItem item;
         for (; it < serialized_data.end(); it += sizeof(NodePathItem)) {
@@ -66,6 +84,9 @@ namespace moq::peering {
 
         auto lat_bytes = BytesOf(node_info.latitude);
         data.insert(data.end(), lat_bytes.rbegin(), lat_bytes.rend());
+
+        auto metric_bytes = BytesOf(node_info.metric);
+        data.insert(data.end(), metric_bytes.rbegin(), metric_bytes.rend());
 
         for (const auto& path_ni : node_info.path) {
             data.insert(data.end(),

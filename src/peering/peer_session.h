@@ -72,6 +72,25 @@ namespace moq::peering {
         /// Identity, role, status, and a fresh smoothed RTT.
         PeerSnapshot Snapshot();
 
+        /// Metric configured for this session. Zero when none was set.
+        std::uint64_t SessionMetric() const { return session_metric_; }
+
+        /**
+         * @brief Metric written into advertisements on this session
+         *
+         * @details The session value is used only when it is greater than the node metric.
+         */
+        std::uint64_t AdvertisedMetric() const;
+
+        /// This node, with the metric for this session and an empty path.
+        NodeInfo LocalNodeAdvertisement() const;
+
+        /// Hop appended when this node forwards an advertisement on this session.
+        NodePathItem ForwardPathItem() const;
+
+        /// Store the session metric. The caller advertises again when the effective value changes.
+        void SetSessionMetric(std::uint64_t metric);
+
         /// The QUIC connection is gone. Further callbacks from it are ignored.
         void MarkDisconnected();
 
@@ -178,6 +197,9 @@ namespace moq::peering {
 
         bool is_inbound_{ false };
         bool connection_closed_{ false };
+
+        /// Peering-session metric. Zero leaves the node metric unchanged.
+        std::uint64_t session_metric_{ 0 };
 
         std::map<std::uint64_t, SubscribeNodeSet> sub_sns_;
         std::map<std::pair<PeerSessionId, SubscribeNodeSetId>, SubscribeNodeSet> peer_sns_;

@@ -5,22 +5,54 @@
 #include "name.h"
 
 namespace moq::peering {
-    bool ForwardingBase::AddNode(std::shared_ptr<PeerSession> peer_session, const NodeInfo& node_info)
+    namespace {
+        bool SameAdvertisement(const NodeInfo& left, const NodeInfo& right)
+        {
+            if (left.metric != right.metric || left.type != right.type || left.contact != right.contact ||
+                left.longitude != right.longitude || left.latitude != right.latitude ||
+                left.path.size() != right.path.size()) {
+                return false;
+            }
+
+            for (std::size_t i = 0; i < left.path.size(); ++i) {
+                if (left.path[i].id != right.path[i].id || left.path[i].srtt_us != right.path[i].srtt_us ||
+                    left.path[i].metric != right.path[i].metric) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    } // namespace
+
+    ForwardingBase::NodeAddResult ForwardingBase::AddNode(std::shared_ptr<PeerSession> peer_session,
+                                                          const NodeInfo& node_info)
     {
         std::lock_guard _(mutex_);
 
+        NodeInfo previous;
+        bool had_previous{ false };
         auto it = nodes_.find({ node_info.id, peer_session->GetSessionId() });
         if (it == nodes_.end()) {
             // New node entry
             nodes_.try_emplace({ node_info.id, peer_session->GetSessionId() }, NodeItem{ peer_session, node_info });
         } else {
-            // Existing update
+            had_previous = true;
+            previous = it->second.node_info;
             it->second = { peer_session, node_info };
         }
 
         nodes_by_peer_session_[peer_session->GetSessionId()].emplace(node_info.id);
 
-        return SelectBestNode(node_info.id);
+        NodeAddResult result;
+        result.best_changed = SelectBestNode(node_info.id);
+
+        const auto best = nodes_best_.find(node_info.id);
+        if (best != nodes_best_.end()) {
+            if (const auto session = best->second.lock(); session && session == peer_session) {
+                result.best_info_changed = !had_previous || !SameAdvertisement(previous, node_info);
+            }
+        }
+        return result;
     }
 
     bool ForwardingBase::RemoveNode(PeerSessionId peer_session_id, NodeIdValueType node_id)
@@ -356,18 +388,22 @@ namespace moq::peering {
              *
              * Choose the node that first matches the below in the order defined:
              *
-             * 1. Prefer lower size `path` (hops). A longer path never wins on sRTT alone.
-             * 2. Prefer lower total sRTT when the hop count is the same.
+             * 1. Prefer the lower sum of metrics. The sum is the node metric plus each hop.
+             * 2. When the metric sums are equal, prefer fewer hops.
+             * 3. When the hop counts are equal, prefer the lower total sRTT.
              *
-             * Equal hop count and equal sRTT keep the peer already selected, so a repeated
+             * Equal metric, hop count, and sRTT keep the peer already selected, so a repeated
              * advertisement does not move streams.
              */
+            const auto candidate_metric = node_item.node_info.SumMetric();
+            const auto best_metric = best_node_info.SumMetric();
             const auto candidate_hops = node_item.node_info.path.size();
             const auto best_hops = best_node_info.path.size();
-            const bool shorter = candidate_hops < best_hops;
-            const bool same_hops_lower_rtt =
-              candidate_hops == best_hops && node_item.node_info.SumSrtt() < best_node_info.SumSrtt();
-            if (shorter || same_hops_lower_rtt) {
+            const bool lower_metric = candidate_metric < best_metric;
+            const bool same_metric_fewer_hops = candidate_metric == best_metric && candidate_hops < best_hops;
+            const bool same_metric_hops_lower_rtt = candidate_metric == best_metric && candidate_hops == best_hops &&
+                                                    node_item.node_info.SumSrtt() < best_node_info.SumSrtt();
+            if (lower_metric || same_metric_fewer_hops || same_metric_hops_lower_rtt) {
                 is_updated = true;
                 best_peer_session = candidate;
                 best_node_info = node_item.node_info;
@@ -392,12 +428,13 @@ namespace moq::peering {
                     continue;
                 }
                 SPDLOG_DEBUG("Forwarding table node id: {} contact {} best via peer_session id: {} contact: {} "
-                             "path_len: {} sum_srtt: {}",
+                             "path_len: {} sum_metric: {} sum_srtt: {}",
                              NodeId().Value(node.first),
                              node_item->second.node_info.contact,
                              session->GetSessionId(),
                              session->remote_node_info_.contact,
                              node_item->second.node_info.path.size(),
+                             node_item->second.node_info.SumMetric(),
                              node_item->second.node_info.SumSrtt());
             }
             SPDLOG_DEBUG("Forwarding Table Dump DONE ------------------------------");

@@ -112,6 +112,7 @@ namespace moq::peering {
     {
         NodeIdValueType id;    ///< Id of the node that received the node info
         uint64_t srtt_us{ 0 }; ///< SRTT in microseconds of the peer session that received the node info
+        uint64_t metric{ 0 };  ///< Metric that node advertised on the session that carried this hop
     } MOQ_PEERING_PACKED_ATTR;
 #if defined(_MSC_VER)
 #pragma pack(pop)
@@ -136,6 +137,9 @@ namespace moq::peering {
         double longitude{ 0 }; ///< 8 byte longitude value detailing the location of the local relay
         double latitude{ 0 };  ///< 8 byte latitude value detailing the location of the local relay
 
+        /// Cost of this node. Lower sums are preferred. Defaults to kDefaultNodeMetric.
+        uint64_t metric{ kDefaultNodeMetric };
+
         /// Path of nodes that this node info has been seen by. When sending this node info, a new entry
         /// is added into this list upon sending. The value of this in the NIB does not contain self.
         std::vector<NodePathItem> path;
@@ -159,6 +163,13 @@ namespace moq::peering {
          * @returns the total of sRTTs for each path hop
          */
         uint64_t SumSrtt() const;
+
+        /**
+         * @brief Cost of the path
+         * @details The node's own metric plus the metric recorded on each hop. A direct advertisement
+         *      is the node's metric alone. Lower sums are preferred.
+         */
+        uint64_t SumMetric() const;
 
         /**
          * @brief Encode node object into bytes that can be written on the wire

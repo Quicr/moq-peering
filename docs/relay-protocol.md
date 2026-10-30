@@ -467,7 +467,9 @@ The NIB contains the following:
 | **Contact**               | FQDN or IP to reach the node. This may be an FQDN of the load balancer or anycast IP |
 | **Longitude**             | Longitude of the node location as a double 64-bit value                              |
 | **Latitude**              | Latitude of the node location as a double 64-bit value                               |
+| **Metric**                | Unsigned 64-bit cost of this node. The default is 100. A peering session advertises a higher value when that session is configured with a greater metric. Lower sums are preferred. |
 | [Node Path](#node-path)   | Path of nodes the node information has traversed                                     |
+| SumMetric                 | The node metric plus the metric of each hop. A direct peer is the node metric alone  |
 | SumSrtt                   | Sum of SRTT in microseconds for peering sessions in the path, zero if peer is direct |
 
 > [!NOTE]
@@ -509,6 +511,7 @@ NPIs contain the following fields.
 | ------------------- | ------------------------------------------------------------------------------------------------ |
 | [Node ID](#node-id) | Node ID of the node sending the advertisement                                                    |
 | **sRTT**            | Smooth round trip time in microseconds of the peering session the node info was **received via** |
+| **Metric**          | Metric that forwarding node advertised on the session that carried this hop                      |
 
 > [!NOTE]
 > Other fields will be added in the future based on changes to [selection algorithm](#selection-algorithm)
@@ -803,8 +806,11 @@ If peering were to be removed between o-relay and v-relay-2, the selection would
 
 Below is the current implemented selection algorithm:
 
-1. Prefer the shortest path len (number of transit hops)
-2. Prefer the lowest sum of sRTT for all paths and the sRTT of the peering session itself
+1. Prefer the lowest sum of metrics. The sum is the advertised node metric plus the metric of each hop. Lower is preferred.
+2. When the metric sums are equal, prefer the shortest path (fewer hops).
+3. When the hop counts are also equal, prefer the lowest sum of sRTT.
+
+A peering session metric replaces the local node metric in advertisements on that session only when the session value is greater. Equal metric, hop count, and sRTT keep the path already selected.
 
 ## Data Forwarding
 

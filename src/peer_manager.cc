@@ -70,9 +70,11 @@ namespace moq::peering {
         return impl_->engine.LocalNodeId();
     }
 
-    PeerAdminResult PeerManager::AddPeer(const std::string& host, std::uint16_t port)
+    PeerAdminResult PeerManager::AddPeer(const std::string& host,
+                                         std::uint16_t port,
+                                         std::optional<std::uint64_t> metric)
     {
-        return impl_->engine.AddPeer(host, port);
+        return impl_->engine.AddPeer(host, port, metric);
     }
 
     PeerAdminResult PeerManager::RemovePeer(const std::string& host, std::uint16_t port)
@@ -83,6 +85,11 @@ namespace moq::peering {
     PeerAdminResult PeerManager::RestartPeer(const std::string& host, std::uint16_t port)
     {
         return impl_->engine.RestartPeer(host, port);
+    }
+
+    PeerAdminResult PeerManager::SetPeerMetric(const std::string& host, std::uint16_t port, std::uint64_t metric)
+    {
+        return impl_->engine.SetPeerMetric(host, port, metric);
     }
 
     void PeerManager::SendData(std::uint64_t track_hash,

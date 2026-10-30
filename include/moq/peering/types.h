@@ -23,6 +23,9 @@ namespace moq::peering {
         kStub,    ///< Relay that is a stub edge
     };
 
+    /// Cost of a node when no other metric is configured. Lower path sums are preferred.
+    inline constexpr std::uint64_t kDefaultNodeMetric = 100;
+
     /**
      * @brief How an announcement should be interpreted
      */
@@ -79,6 +82,10 @@ namespace moq::peering {
     {
         std::string node_id;
         NodeType node_type{ NodeType::kEdge };
+
+        /// Cost advertised for this node. A peering session uses its own metric when that value is greater.
+        std::uint64_t node_metric{ kDefaultNodeMetric };
+
         uint16_t listen_port{ 33434 };
         std::vector<std::pair<std::string, uint16_t>> peers;
 
@@ -204,6 +211,12 @@ namespace moq::peering {
         /// Smoothed RTT in microseconds. Zero when the connection has no sample yet.
         std::uint64_t srtt_us{ 0 };
 
+        /// Metric configured for this peering session. Zero when add-peer did not set one.
+        std::uint64_t metric{ 0 };
+
+        /// Metric written into this node's advertisements on this session.
+        std::uint64_t node_metric{ 0 };
+
         /// Unix time in microseconds when the current attempt became connected. Zero otherwise.
         std::uint64_t connect_time_us{ 0 };
 
@@ -214,12 +227,14 @@ namespace moq::peering {
         std::uint64_t publishes{ 0 };
     };
 
-    /// Result of an admin add, remove, or restart of one peer address.
+    /// Result of an admin add, remove, restart, or metric change for one peer address.
     struct PeerAdminResult
     {
         bool ok{ false };
         std::string host;
         std::uint16_t port{ 0 };
+        /// Set when the call carried a session metric.
+        std::optional<std::uint64_t> metric;
         std::string action;
         std::string message;
     };

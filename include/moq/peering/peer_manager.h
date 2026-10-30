@@ -5,6 +5,7 @@
 #include <moq/peering/types.h>
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace moq::peering {
@@ -59,11 +60,23 @@ namespace moq::peering {
          *
          * @details An address that is already dialed is a duplicate. An accepted session from that
          *      host is left up. The address is kept so this node dials it if the inbound session closes.
+         *      `metric` is the cost advertised for this node on that session when it is greater than
+         *      the node metric.
          */
-        PeerAdminResult AddPeer(const std::string& host, std::uint16_t port);
+        PeerAdminResult AddPeer(const std::string& host,
+                                std::uint16_t port,
+                                std::optional<std::uint64_t> metric = std::nullopt);
 
         /// Disconnect host:port and drop its forwarding state. Missing peers fail.
         PeerAdminResult RemovePeer(const std::string& host, std::uint16_t port);
+
+        /**
+         * @brief Change the metric advertised on an existing peering session
+         *
+         * @details The session value is used for this node's advertisements on that session only when
+         *      it is greater than the node metric. The new cost is advertised again when it changes.
+         */
+        PeerAdminResult SetPeerMetric(const std::string& host, std::uint16_t port, std::uint64_t metric);
 
         /**
          * @brief Drop a peer's connection and forwarding state

@@ -27,9 +27,10 @@ TEST_CASE("Serialize Node Info")
     ni.contact = "localhost:1234";
     ni.latitude = 47.6482974;
     ni.longitude = -122.5327124;
+    ni.metric = 250;
 
-    ni.path.push_back({ NodeId().Value("1:1"), 54321 });
-    ni.path.push_back({ NodeId().Value("2:2"), 12345 });
+    ni.path.push_back({ NodeId().Value("1:1"), 54321, 100 });
+    ni.path.push_back({ NodeId().Value("2:2"), 12345, 400 });
 
     std::vector<uint8_t> data;
     data.reserve(10000000);
@@ -40,7 +41,8 @@ TEST_CASE("Serialize Node Info")
 
     auto net_data = ni.Serialize();
 
-    CHECK_EQ(net_data.size(), 68);
+    CHECK_EQ(net_data.size(), 92);
+    CHECK_EQ(ni.SumMetric(), 750);
 
     NodeInfo decoded_ni(net_data);
 
@@ -50,9 +52,12 @@ TEST_CASE("Serialize Node Info")
     CHECK_EQ(ni.contact, decoded_ni.contact);
     CHECK_EQ(ni.longitude, decoded_ni.longitude);
     CHECK_EQ(ni.latitude, decoded_ni.latitude);
+    CHECK_EQ(ni.metric, decoded_ni.metric);
+    CHECK_EQ(decoded_ni.SumMetric(), 750);
 
     for (size_t i = 0; i < ni.path.size(); i++) {
         CHECK_EQ(ni.path.at(i).id, decoded_ni.path.at(i).id);
         CHECK_EQ(ni.path.at(i).srtt_us, decoded_ni.path.at(i).srtt_us);
+        CHECK_EQ(ni.path.at(i).metric, decoded_ni.path.at(i).metric);
     }
 }

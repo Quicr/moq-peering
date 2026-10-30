@@ -104,12 +104,16 @@ namespace moq::peering {
         auto peer_session = GetPeerSession(peer_session_id);
 
         if (not withdraw) {
-            if (info_base_->AddNode(peer_session, node_info)) {
+            const auto added = info_base_->AddNode(peer_session, node_info);
+            if (added.best_changed || added.best_info_changed) {
                 // Append this node, not the advertised one. The path records who forwarded the
-                // advertisement so the next hop can prefer a shorter path and stop loops.
+                // advertisement so the next hop can prefer a lower metric and stop loops.
+                // PropagateNodeInfo replaces the hop metric with each egress session's metric.
                 auto adv_node_info = node_info;
-                adv_node_info.path.push_back({ peer_session->node_info_.id, peer_session->metrics_.srtt_us });
+                adv_node_info.path.push_back(peer_session->ForwardPathItem());
                 PropagateNodeInfo(adv_node_info);
+            }
+            if (added.best_changed) {
                 MoveSubscriberToBest(node_info.id);
             }
         } else {
@@ -118,7 +122,7 @@ namespace moq::peering {
             const bool still_reachable = info_base_->RemoveNode(peer_session_id, node_info.id);
             if (!still_reachable) {
                 auto adv_node_info = node_info;
-                adv_node_info.path.push_back({ peer_session->node_info_.id, peer_session->metrics_.srtt_us });
+                adv_node_info.path.push_back(peer_session->ForwardPathItem());
                 PropagateNodeInfo(adv_node_info, true);
             }
         }
@@ -1094,6 +1098,7 @@ namespace moq::peering {
         node_info_.contact = config_.node_id;
         node_info_.id = std::hash<std::string>{}(config_.node_id);
         node_info_.type = config_.node_type;
+        node_info_.metric = config_.node_metric;
 
         server_endpoint_ = QuicEndpoint::Listen(config_.tls_cert_filename,
                                                 config_.tls_key_filename,
@@ -1326,26 +1331,7 @@ namespace moq::peering {
     {
         std::lock_guard _(mutex_);
 
-        // Send all node info
-        for (auto [key, node_item] : info_base_->nodes_) {
-            if (key.first == peer_session.node_info_.id || key.second == peer_session.GetSessionId() ||
-                key.first == peer_session.remote_node_info_.id)
-                continue; // Skip, node is self, learned from peer, or peer is the node info
-
-            bool skip{ false };
-            for (auto& npi : node_item.node_info.path) {
-                if (npi.id == peer_session.remote_node_info_.id) {
-                    skip = true;
-                    break; // Skip, remote peer is in path
-                }
-            }
-
-            if (skip)
-                continue;
-
-            node_item.node_info.path.push_back({ peer_session.node_info_.id, peer_session.metrics_.srtt_us });
-            peer_session.SendNodeInfo(node_item.node_info);
-        }
+        SendKnownNodes(peer_session);
 
         for (const auto& [th, anno_item] : info_base_->announces_) {
             for (const auto& [_, anno_info] : anno_item) {
@@ -1371,17 +1357,26 @@ namespace moq::peering {
     {
         std::lock_guard _(mutex_);
 
+        auto send_one = [&](const std::shared_ptr<PeerSession>& peer_session) {
+            if (peer_session->remote_node_info_.id == node_info.id) {
+                return;
+            }
+            auto outbound = node_info;
+            if (!outbound.path.empty() && outbound.path.back().id == node_info_.id) {
+                outbound.path.back().metric = peer_session->AdvertisedMetric();
+            }
+            peer_session->SendNodeInfo(outbound, withdraw);
+        };
+
         auto server_it = server_peer_sessions_.find(peer_session_id);
         if (server_it != server_peer_sessions_.end()) {
-            if (server_it->second->remote_node_info_.id != node_info.id)
-                server_it->second->SendNodeInfo(node_info, withdraw);
+            send_one(server_it->second);
             return;
         }
 
         auto client_it = client_peer_sessions_.find(peer_session_id);
         if (client_it != client_peer_sessions_.end()) {
-            if (client_it->second->remote_node_info_.id != node_info.id)
-                client_it->second->SendNodeInfo(node_info, withdraw);
+            send_one(client_it->second);
             return;
         }
     }
@@ -1408,7 +1403,11 @@ namespace moq::peering {
             if (skip_node(node_info, peer_session->remote_node_info_))
                 continue;
 
-            peer_session->SendNodeInfo(node_info, withdraw);
+            auto outbound = node_info;
+            if (!outbound.path.empty() && outbound.path.back().id == node_info_.id) {
+                outbound.path.back().metric = peer_session->AdvertisedMetric();
+            }
+            peer_session->SendNodeInfo(outbound, withdraw);
 
             SPDLOG_LOGGER_DEBUG(LOGGER,
                                 "Sending node info; id: {} contact: {} --> remote id: {} contact: {} withdraw: {}",
@@ -1423,7 +1422,11 @@ namespace moq::peering {
             if (skip_node(node_info, peer_session->remote_node_info_))
                 continue;
 
-            peer_session->SendNodeInfo(node_info, withdraw);
+            auto outbound = node_info;
+            if (!outbound.path.empty() && outbound.path.back().id == node_info_.id) {
+                outbound.path.back().metric = peer_session->AdvertisedMetric();
+            }
+            peer_session->SendNodeInfo(outbound, withdraw);
 
             SPDLOG_LOGGER_DEBUG(LOGGER,
                                 "Sending node info; id: {} contact: {} --> remote id: {} --> contact: {} withdraw: {}",
@@ -1450,9 +1453,48 @@ namespace moq::peering {
         throw std::invalid_argument("Peer session id does not exist");
     }
 
-    bool Engine::CreatePeerSession(const std::string& host, uint16_t port)
+    void Engine::SendKnownNodes(PeerSession& peer_session)
+    {
+        for (auto [key, node_item] : info_base_->nodes_) {
+            if (key.first == peer_session.node_info_.id || key.second == peer_session.GetSessionId() ||
+                key.first == peer_session.remote_node_info_.id)
+                continue; // Skip, node is self, learned from peer, or peer is the node info
+
+            bool skip{ false };
+            for (auto& npi : node_item.node_info.path) {
+                if (npi.id == peer_session.remote_node_info_.id) {
+                    skip = true;
+                    break; // Skip, remote peer is in path
+                }
+            }
+
+            if (skip)
+                continue;
+
+            node_item.node_info.path.push_back(peer_session.ForwardPathItem());
+            peer_session.SendNodeInfo(node_item.node_info);
+        }
+    }
+
+    void Engine::UpdateSessionMetric(const std::shared_ptr<PeerSession>& session, std::uint64_t metric)
+    {
+        const auto before = session->AdvertisedMetric();
+        session->SetSessionMetric(metric);
+        if (session->AdvertisedMetric() == before || session->Status() != PeerSession::StatusValue::kConnected) {
+            return;
+        }
+
+        session->SendNodeInfo(session->LocalNodeAdvertisement());
+        std::lock_guard lock(mutex_);
+        SendKnownNodes(*session);
+    }
+
+    bool Engine::CreatePeerSession(const std::string& host, uint16_t port, std::optional<std::uint64_t> metric)
     {
         auto peer_sess = std::make_shared<PeerSession>(false, config_, node_info_, host, port, *this);
+        if (metric.has_value()) {
+            peer_sess->SetSessionMetric(*metric);
+        }
         peer_sess->Connect();
         auto key = peer_sess->GetSessionId();
 
@@ -1542,13 +1584,13 @@ namespace moq::peering {
                     }
                 }
 
-                std::vector<std::pair<std::string, std::uint16_t>> pending;
+                std::vector<PendingDial> pending;
                 {
                     std::lock_guard lock(mutex_);
                     pending.swap(pending_dials_);
                 }
-                for (const auto& [host, port] : pending) {
-                    CreatePeerSession(host, port);
+                for (const auto& dial : pending) {
+                    CreatePeerSession(dial.host, dial.port, dial.metric);
                 }
             }
 
@@ -2159,11 +2201,14 @@ namespace moq::peering {
 
     void Engine::DialAfterInboundLoss(const std::string& remote_host)
     {
-        std::vector<std::pair<std::string, std::uint16_t>> redial;
+        std::vector<std::pair<std::pair<std::string, std::uint16_t>, std::optional<std::uint64_t>>> redial;
         std::vector<std::pair<std::string, std::uint16_t>> dialed;
         {
             std::lock_guard lock(mutex_);
-            redial.assign(inbound_redial_.begin(), inbound_redial_.end());
+            redial.reserve(inbound_redial_.size());
+            for (const auto& entry : inbound_redial_) {
+                redial.push_back(entry);
+            }
             dialed.reserve(client_peer_sessions_.size());
             for (const auto& [_, session] : client_peer_sessions_) {
                 if (session) {
@@ -2173,21 +2218,21 @@ namespace moq::peering {
         }
 
         std::vector<std::pair<std::string, std::uint16_t>> drop;
-        std::vector<std::pair<std::string, std::uint16_t>> dial;
-        for (const auto& item : redial) {
-            if (!HostsMatch(item.first, remote_host)) {
+        std::vector<PendingDial> dial;
+        for (const auto& [endpoint, metric] : redial) {
+            if (!HostsMatch(endpoint.first, remote_host)) {
                 continue;
             }
             bool already_dialed{ false };
             for (const auto& existing : dialed) {
-                if (existing.second == item.second && HostsMatch(existing.first, item.first)) {
+                if (existing.second == endpoint.second && HostsMatch(existing.first, endpoint.first)) {
                     already_dialed = true;
                     break;
                 }
             }
-            drop.push_back(item);
+            drop.push_back(endpoint);
             if (!already_dialed) {
-                dial.push_back(item);
+                dial.push_back(PendingDial{ endpoint.first, endpoint.second, metric });
             }
         }
 
@@ -2205,7 +2250,7 @@ namespace moq::peering {
         std::lock_guard lock(mutex_);
         for (const auto& item : dial) {
             SPDLOG_LOGGER_INFO(
-              LOGGER, "Dialing peer {} after the inbound session closed", PeerAddressText(item.first, item.second));
+              LOGGER, "Dialing peer {} after the inbound session closed", PeerAddressText(item.host, item.port));
             pending_dials_.push_back(item);
         }
     }
@@ -2215,7 +2260,10 @@ namespace moq::peering {
         std::vector<std::pair<std::string, std::uint16_t>> redial;
         {
             std::lock_guard lock(mutex_);
-            redial.assign(inbound_redial_.begin(), inbound_redial_.end());
+            redial.reserve(inbound_redial_.size());
+            for (const auto& [endpoint, _] : inbound_redial_) {
+                redial.push_back(endpoint);
+            }
         }
 
         std::vector<std::pair<std::string, std::uint16_t>> drop;
@@ -2234,12 +2282,15 @@ namespace moq::peering {
         }
     }
 
-    PeerAdminResult Engine::AddPeer(const std::string& host, std::uint16_t port)
+    PeerAdminResult Engine::AddPeer(const std::string& host,
+                                    std::uint16_t port,
+                                    std::optional<std::uint64_t> metric)
     {
         const auto address = StripHostBrackets(host);
         PeerAdminResult result;
         result.host = address;
         result.port = port;
+        result.metric = metric;
 
         const auto found = LocatePeers(address, port);
         bool dialed{ false };
@@ -2261,9 +2312,20 @@ namespace moq::peering {
         }
 
         if (accepted) {
+            if (metric.has_value()) {
+                for (const auto& peer : found) {
+                    if (peer.inbound && peer.session) {
+                        UpdateSessionMetric(peer.session, *metric);
+                    }
+                }
+            }
             {
                 std::lock_guard lock(mutex_);
-                inbound_redial_.insert({ address, port });
+                const auto [it, inserted] = inbound_redial_.try_emplace({ address, port }, std::nullopt);
+                (void)inserted;
+                if (metric.has_value()) {
+                    it->second = metric;
+                }
             }
             result.ok = true;
             result.action = "added";
@@ -2272,7 +2334,7 @@ namespace moq::peering {
             return result;
         }
 
-        if (!CreatePeerSession(address, port)) {
+        if (!CreatePeerSession(address, port, metric)) {
             result.message = "duplicate peer " + text;
             SPDLOG_LOGGER_WARN(LOGGER, "{}", result.message);
             return result;
@@ -2281,6 +2343,49 @@ namespace moq::peering {
         result.ok = true;
         result.action = "added";
         result.message = "Added peer " + text;
+        SPDLOG_LOGGER_INFO(LOGGER, "{}", result.message);
+        return result;
+    }
+
+    PeerAdminResult Engine::SetPeerMetric(const std::string& host, std::uint16_t port, std::uint64_t metric)
+    {
+        const auto address = StripHostBrackets(host);
+        PeerAdminResult result;
+        result.host = address;
+        result.port = port;
+        result.metric = metric;
+        const auto text = PeerAddressText(address, port);
+
+        std::vector<std::shared_ptr<PeerSession>> targets;
+        for (const auto& peer : LocatePeers(address, port)) {
+            if ((peer.exact || peer.inbound) && peer.session) {
+                targets.push_back(peer.session);
+            }
+        }
+
+        bool remembered{ false };
+        {
+            std::lock_guard lock(mutex_);
+            const auto it = inbound_redial_.find({ address, port });
+            if (it != inbound_redial_.end()) {
+                it->second = metric;
+                remembered = true;
+            }
+        }
+
+        if (targets.empty() && !remembered) {
+            result.message = "peer " + text + " does not exist";
+            SPDLOG_LOGGER_WARN(LOGGER, "{}", result.message);
+            return result;
+        }
+
+        for (const auto& session : targets) {
+            UpdateSessionMetric(session, metric);
+        }
+
+        result.ok = true;
+        result.action = "metric";
+        result.message = "Set peer " + text + " metric to " + std::to_string(metric);
         SPDLOG_LOGGER_INFO(LOGGER, "{}", result.message);
         return result;
     }

@@ -23,7 +23,7 @@ TEST_CASE("Serialize Connect")
     auto net_data = connect.Serialize();
 
     CHECK_EQ(net_data.size(), connect.SizeBytes() + kCommonHeadersSize);
-    CHECK_EQ(net_data.size(), 80);
+    CHECK_EQ(net_data.size(), 104);
 
     Connect decoded_c({ net_data.begin() + kCommonHeadersSize, net_data.end() });
 
@@ -55,7 +55,7 @@ TEST_CASE("Serialize Connect Response")
     auto net_data = connect_resp.Serialize();
 
     CHECK_EQ(net_data.size(), connect_resp.SizeBytes() + kCommonHeadersSize);
-    CHECK_EQ(net_data.size(), 71);
+    CHECK_EQ(net_data.size(), 87);
 
     ConnectResponse decoded_cr({ net_data.begin() + kCommonHeadersSize, net_data.end() });
 

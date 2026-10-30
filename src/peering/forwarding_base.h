@@ -28,14 +28,21 @@ namespace moq::peering {
         ForwardingBase() = default;
         virtual ~ForwardingBase() = default;
 
+        /// What changed when a node advertisement was stored.
+        struct NodeAddResult
+        {
+            /// The peering session selected for this node changed.
+            bool best_changed{ false };
+            /// The selected session is the same and the advertisement it carries changed.
+            bool best_info_changed{ false };
+        };
+
         /**
          * @brief Add or update node in the info base
          * @details This will add or update a node in the info base. Upon update, other tables
          *   will be updated to compute the best node based on change.
-         *
-         * @returns True if the node is updated as best
          */
-        bool AddNode(std::shared_ptr<PeerSession> peer_session, const NodeInfo& node_info);
+        NodeAddResult AddNode(std::shared_ptr<PeerSession> peer_session, const NodeInfo& node_info);
 
         /**
          * @brief Remove node from the info base
