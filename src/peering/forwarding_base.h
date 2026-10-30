@@ -237,10 +237,12 @@ namespace moq::peering {
 
             /// Egress stream whose CreateStream is posted and not in `streams` yet.
             /// `close` is set when the subgroup or ingress stream ends during that gap.
+            /// `pending` holds bytes that arrived before the stream was inserted.
             struct OpeningStream
             {
                 bool close{ false };
                 bool reset{ false };
+                std::vector<std::shared_ptr<std::vector<uint8_t>>> pending;
             };
 
             std::unordered_map<StreamKey, OpeningStream, StreamKeyHash> opening;
@@ -248,7 +250,10 @@ namespace moq::peering {
             void ArmOpen(StreamKey key) { opening.try_emplace(key); }
 
             /// @return True when the bytes should be sent and the stream then closed.
-            bool ConsumeOpen(StreamKey key, bool& reset)
+            ///         `pending` receives object bytes that arrived while the stream was opening.
+            bool ConsumeOpen(StreamKey key,
+                             bool& reset,
+                             std::vector<std::shared_ptr<std::vector<uint8_t>>>* pending = nullptr)
             {
                 const auto it = opening.find(key);
                 if (it == opening.end()) {
@@ -257,8 +262,22 @@ namespace moq::peering {
                 }
                 const bool close = it->second.close;
                 reset = it->second.reset;
+                if (pending != nullptr) {
+                    *pending = std::move(it->second.pending);
+                }
                 opening.erase(it);
                 return close;
+            }
+
+            /// Queue bytes that belong to a stream whose CreateStream has not finished.
+            bool QueueDuringOpen(StreamKey key, std::shared_ptr<std::vector<uint8_t>> bytes)
+            {
+                const auto it = opening.find(key);
+                if (it == opening.end()) {
+                    return false;
+                }
+                it->second.pending.push_back(std::move(bytes));
+                return true;
             }
 
             void DeferClose(StreamKey key, bool reset)

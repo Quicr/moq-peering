@@ -544,6 +544,7 @@ namespace moq::peering {
             bool reset_after_send{ false };
             ForwardingBase::StreamKey key{};
             std::shared_ptr<std::vector<uint8_t>> data;
+            std::vector<std::shared_ptr<std::vector<uint8_t>>> pending;
         };
 
         std::vector<Step> steps;
@@ -610,7 +611,10 @@ namespace moq::peering {
                         auto sid_it = entry.streams.find(step.key);
                         if (sid_it == entry.streams.end()) {
                             if (!is_new_stream) {
-                                continue; // Ignore existing data and wait for start of new stream
+                                // The egress stream is still being opened on the other connection.
+                                // Dropping these bytes leaves the next hop with a header and no object.
+                                entry.QueueDuringOpen(step.key, step.data);
+                                continue;
                             }
                             step.open_stream = true;
                             // Record the open before releasing the lock. CloseStream can run before
@@ -677,7 +681,8 @@ namespace moq::peering {
                                 discard = std::move(opened);
                                 step.stream = inserted_it->second;
                             } else {
-                                step.close_after_send = entry->second.ConsumeOpen(step.key, step.reset_after_send);
+                                step.close_after_send =
+                                  entry->second.ConsumeOpen(step.key, step.reset_after_send, &step.pending);
                                 step.stream = inserted_it->second;
                                 if (step.close_after_send) {
                                     entry->second.streams.erase(inserted_it);
@@ -695,6 +700,10 @@ namespace moq::peering {
 
                 step.session->SendData(
                   data_header.priority, data_header.ttl, step.stream, eflags, std::move(step.data));
+                for (auto& chunk : step.pending) {
+                    step.session->SendData(
+                      data_header.priority, data_header.ttl, step.stream, eflags, std::move(chunk));
+                }
                 if (step.close_after_send) {
                     if (step.reset_after_send) {
                         step.session->CloseStream(step.stream, StreamClose::kReset);
@@ -775,6 +784,7 @@ namespace moq::peering {
             bool reset_after_send{ false };
             ForwardingBase::StreamKey key{};
             std::shared_ptr<std::vector<uint8_t>> data;
+            std::vector<std::shared_ptr<std::vector<uint8_t>>> pending;
             SubscribeNodeSetId sns_id{ 0 };
         };
 
@@ -847,6 +857,8 @@ namespace moq::peering {
                     auto stream_it = fib_entry.streams.find(out.key);
                     if (stream_it == fib_entry.streams.end()) {
                         if (data_header.type != DataType::kNewStream) {
+                            // Same gap as peer forwarding: the stream open is still posted.
+                            fib_entry.QueueDuringOpen(out.key, out.data);
                             continue;
                         }
                         out.open_stream = true;
@@ -891,7 +903,8 @@ namespace moq::peering {
                                   discard = std::move(opened);
                                   out.stream = inserted_it->second;
                               } else {
-                                  out.close_after_send = fib->second.ConsumeOpen(out.key, out.reset_after_send);
+                                  out.close_after_send =
+                                    fib->second.ConsumeOpen(out.key, out.reset_after_send, &out.pending);
                                   out.stream = inserted_it->second;
                                   if (out.close_after_send) {
                                       fib->second.streams.erase(inserted_it);
@@ -917,6 +930,9 @@ namespace moq::peering {
                   }
 
                   out.session->SendData(priority, ttl, out.stream, eflags, out.data);
+                  for (auto& chunk : out.pending) {
+                      out.session->SendData(priority, ttl, out.stream, eflags, std::move(chunk));
+                  }
                   if (out.close_after_send) {
                       if (out.reset_after_send) {
                           out.session->CloseStream(out.stream, StreamClose::kReset);
