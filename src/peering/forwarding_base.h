@@ -234,6 +234,44 @@ namespace moq::peering {
              *      New streams and datagrams use the new peer. The entry is removed once `streams` is empty.
              */
             bool drain{ false };
+
+            /// Egress stream whose CreateStream is posted and not in `streams` yet.
+            /// `close` is set when the subgroup or ingress stream ends during that gap.
+            struct OpeningStream
+            {
+                bool close{ false };
+                bool reset{ false };
+            };
+
+            std::unordered_map<StreamKey, OpeningStream, StreamKeyHash> opening;
+
+            void ArmOpen(StreamKey key) { opening.try_emplace(key); }
+
+            /// @return True when the bytes should be sent and the stream then closed.
+            bool ConsumeOpen(StreamKey key, bool& reset)
+            {
+                const auto it = opening.find(key);
+                if (it == opening.end()) {
+                    reset = false;
+                    return false;
+                }
+                const bool close = it->second.close;
+                reset = it->second.reset;
+                opening.erase(it);
+                return close;
+            }
+
+            void DeferClose(StreamKey key, bool reset)
+            {
+                const auto it = opening.find(key);
+                if (it == opening.end()) {
+                    return;
+                }
+                it->second.close = true;
+                if (reset) {
+                    it->second.reset = true;
+                }
+            }
         };
 
         /**

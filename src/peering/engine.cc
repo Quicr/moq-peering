@@ -540,6 +540,8 @@ namespace moq::peering {
             PeerSessionId egress_id{ 0 };
             std::shared_ptr<QuicStream> stream;
             bool open_stream{ false };
+            bool close_after_send{ false };
+            bool reset_after_send{ false };
             ForwardingBase::StreamKey key{};
             std::shared_ptr<std::vector<uint8_t>> data;
         };
@@ -611,6 +613,9 @@ namespace moq::peering {
                                 continue; // Ignore existing data and wait for start of new stream
                             }
                             step.open_stream = true;
+                            // Record the open before releasing the lock. CloseStream can run before
+                            // the connection thread inserts the stream.
+                            entry.ArmOpen(step.key);
                         } else {
                             step.stream = sid_it->second;
                         }
@@ -655,16 +660,29 @@ namespace moq::peering {
                     {
                         std::lock_guard lock(info_base_->mutex_);
                         const auto fib = info_base_->peer_fib_.find({ peer_session_id, data_header.sns_id });
-                        if (fib == info_base_->peer_fib_.end() || opened == nullptr) {
+                        const bool created = opened != nullptr;
+                        if (fib == info_base_->peer_fib_.end() || !created) {
                             discard = std::move(opened);
+                            if (fib != info_base_->peer_fib_.end()) {
+                                if (const auto entry = fib->second.find(step.egress_id); entry != fib->second.end()) {
+                                    bool ignored = false;
+                                    entry->second.ConsumeOpen(step.key, ignored);
+                                }
+                            }
                         } else if (const auto entry = fib->second.find(step.egress_id); entry == fib->second.end()) {
                             discard = std::move(opened);
                         } else {
                             const auto [inserted_it, inserted] = entry->second.streams.try_emplace(step.key, opened);
                             if (!inserted) {
                                 discard = std::move(opened);
+                                step.stream = inserted_it->second;
+                            } else {
+                                step.close_after_send = entry->second.ConsumeOpen(step.key, step.reset_after_send);
+                                step.stream = inserted_it->second;
+                                if (step.close_after_send) {
+                                    entry->second.streams.erase(inserted_it);
+                                }
                             }
-                            step.stream = inserted_it->second;
                         }
                     }
                     if (discard) {
@@ -677,6 +695,13 @@ namespace moq::peering {
 
                 step.session->SendData(
                   data_header.priority, data_header.ttl, step.stream, eflags, std::move(step.data));
+                if (step.close_after_send) {
+                    if (step.reset_after_send) {
+                        step.session->CloseStream(step.stream, StreamClose::kReset);
+                    } else {
+                        step.session->FinishStream(step.stream);
+                    }
+                }
             });
         }
     }
@@ -716,9 +741,12 @@ namespace moq::peering {
                         peer_sess->FinishStream(stream_it->second);
                     }
                     fib_entry.streams.erase(stream_it);
+                    fib_entry.opening.erase(key);
                     if (fib_entry.drain && fib_entry.streams.empty()) {
                         finished_drains.push_back(it->first);
                     }
+                } else {
+                    fib_entry.DeferClose(key, reset);
                 }
             }
         }
@@ -743,6 +771,8 @@ namespace moq::peering {
             PeerSessionId session_id{ 0 };
             std::shared_ptr<QuicStream> stream;
             bool open_stream{ false };
+            bool close_after_send{ false };
+            bool reset_after_send{ false };
             ForwardingBase::StreamKey key{};
             std::shared_ptr<std::vector<uint8_t>> data;
             SubscribeNodeSetId sns_id{ 0 };
@@ -820,6 +850,9 @@ namespace moq::peering {
                             continue;
                         }
                         out.open_stream = true;
+                        // Record the open before releasing the lock. EndSubgroup can run before
+                        // the connection thread inserts the stream.
+                        fib_entry.ArmOpen(out.key);
                     } else {
                         out.stream = stream_it->second;
                         if (out.stream == nullptr) {
@@ -845,14 +878,25 @@ namespace moq::peering {
                       {
                           std::lock_guard lock(info_base_->mutex_);
                           const auto fib = info_base_->client_fib_.find({ track_full_name_hash, out.session_id });
-                          if (fib == info_base_->client_fib_.end() || opened == nullptr) {
+                          const bool created = opened != nullptr;
+                          if (fib == info_base_->client_fib_.end() || !created) {
                               discard = std::move(opened);
+                              if (fib != info_base_->client_fib_.end()) {
+                                  bool ignored = false;
+                                  fib->second.ConsumeOpen(out.key, ignored);
+                              }
                           } else {
                               const auto [inserted_it, inserted] = fib->second.streams.try_emplace(out.key, opened);
                               if (!inserted) {
                                   discard = std::move(opened);
+                                  out.stream = inserted_it->second;
+                              } else {
+                                  out.close_after_send = fib->second.ConsumeOpen(out.key, out.reset_after_send);
+                                  out.stream = inserted_it->second;
+                                  if (out.close_after_send) {
+                                      fib->second.streams.erase(inserted_it);
+                                  }
                               }
-                              out.stream = inserted_it->second;
 
                               SPDLOG_LOGGER_TRACE(LOGGER,
                                                   "Data object send, peer_session: {} egress SNS_ID: {} tfn_hash: {} "
@@ -873,6 +917,13 @@ namespace moq::peering {
                   }
 
                   out.session->SendData(priority, ttl, out.stream, eflags, out.data);
+                  if (out.close_after_send) {
+                      if (out.reset_after_send) {
+                          out.session->CloseStream(out.stream, StreamClose::kReset);
+                      } else {
+                          out.session->FinishStream(out.stream);
+                      }
+                  }
               });
         }
     }
@@ -994,6 +1045,15 @@ namespace moq::peering {
             info_base_->AddAnnounce(ai);
         } else {
             info_base_->RemoveAnnounce(ai);
+            if (!publish_namespace) {
+                // The publisher is gone. Finish egress streams now. Waiting for the subscriber
+                // to withdraw leaves them in the forwarding table, so active_streams never drops.
+                for (auto it = info_base_->client_fib_.lower_bound({ th.track_fullname_hash, 0 });
+                     it != info_base_->client_fib_.end() && it->first.first == th.track_fullname_hash;
+                     ++it) {
+                    CloseFibStreams(it->second);
+                }
+            }
         }
 
         for (const auto& sess : client_peer_sessions_) {
@@ -2030,6 +2090,9 @@ namespace moq::peering {
         }
 
         entry.streams.clear();
+        for (auto& [_, open] : entry.opening) {
+            open.close = true;
+        }
     }
 
     void Engine::CloseStream(PeerSessionId peer_session_id,
@@ -2055,15 +2118,19 @@ namespace moq::peering {
 
                     continue;
                 }
-                auto stream_it = entry.streams.find(IngressStreamKey(stream_id));
+                const auto stream_key = IngressStreamKey(stream_id);
+                auto stream_it = entry.streams.find(stream_key);
                 if (stream_it != entry.streams.end()) {
                     if (auto out_peer_sess = entry.peer_session.lock()) {
                         out_peer_sess->CloseStream(stream_it->second, flag);
                         entry.streams.erase(stream_it);
+                        entry.opening.erase(stream_key);
                         if (entry.drain && entry.streams.empty()) {
                             finished_drains.push_back(out_peer_sess_id);
                         }
                     }
+                } else {
+                    entry.DeferClose(stream_key, flag == StreamClose::kReset);
                 }
             }
         }
