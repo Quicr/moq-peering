@@ -21,6 +21,7 @@ namespace moq::peering {
     namespace {
         constexpr char kAlpn[] = "moq-peering";
         constexpr uint64_t kIdleTimeoutMs = 5000;
+        thread_local bool tls_in_packet_loop = false;
 
         bool IsBidirectional(uint64_t stream_id)
         {
@@ -149,6 +150,24 @@ namespace moq::peering {
         return stream;
     }
 
+    void QuicConnection::Invoke(std::function<void()> fn)
+    {
+        if (!endpoint_ || !endpoint_->active_) {
+            return;
+        }
+        if (endpoint_->OnNetworkThread()) {
+            fn();
+            return;
+        }
+        // This thread is inside some other connection's packet loop. Post and return. Waiting
+        // for the target loop deadlocks when that loop is also waiting to open a stream here.
+        if (tls_in_packet_loop) {
+            endpoint_->Post(std::move(fn));
+            return;
+        }
+        Run(std::move(fn));
+    }
+
     void QuicConnection::Dispatch(std::function<void()> fn)
     {
         if (!endpoint_ || !endpoint_->active_) {
@@ -247,6 +266,7 @@ namespace moq::peering {
                                  void* callback_ctx,
                                  void*)
     {
+        tls_in_packet_loop = true;
         auto* self = static_cast<QuicConnection*>(callback_ctx);
         if (self == nullptr || self->closing_) {
             return 0;
@@ -510,6 +530,7 @@ namespace moq::peering {
                                      void* callback_ctx,
                                      void*)
     {
+        tls_in_packet_loop = true;
         auto* endpoint = static_cast<QuicEndpoint*>(callback_ctx);
         if (endpoint == nullptr) {
             return 0;
@@ -524,6 +545,7 @@ namespace moq::peering {
 
     int QuicEndpoint::LoopCallback(picoquic_quic_t*, picoquic_packet_loop_cb_enum cb_mode, void* callback_ctx, void*)
     {
+        tls_in_packet_loop = true;
         auto* endpoint = static_cast<QuicEndpoint*>(callback_ctx);
         if (endpoint == nullptr) {
             return 0;

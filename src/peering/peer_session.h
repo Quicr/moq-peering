@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <optional>
 #include <set>
@@ -73,7 +74,7 @@ namespace moq::peering {
         PeerSnapshot Snapshot();
 
         /// Metric configured for this session. Zero when none was set.
-        std::uint64_t SessionMetric() const { return session_metric_; }
+        std::uint64_t SessionMetric() const { return session_metric_.load(); }
 
         /**
          * @brief Metric written into advertisements on this session
@@ -104,6 +105,8 @@ namespace moq::peering {
         void ForgetIngress(PeerSessionId peer_session_id);
 
         std::shared_ptr<QuicStream> CreateStream(uint8_t priority) const;
+        /// Run fn on this session's QUIC thread. Another session's packet thread queues fn and returns.
+        void OnConnectionThread(std::function<void()> fn) const;
 
         void CloseStream(const std::shared_ptr<QuicStream>& stream, StreamClose flag);
 
@@ -199,7 +202,7 @@ namespace moq::peering {
         bool connection_closed_{ false };
 
         /// Peering-session metric. Zero leaves the node metric unchanged.
-        std::uint64_t session_metric_{ 0 };
+        std::atomic<std::uint64_t> session_metric_{ 0 };
 
         std::map<std::uint64_t, SubscribeNodeSet> sub_sns_;
         std::map<std::pair<PeerSessionId, SubscribeNodeSetId>, SubscribeNodeSet> peer_sns_;

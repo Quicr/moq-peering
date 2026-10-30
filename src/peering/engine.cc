@@ -641,33 +641,44 @@ namespace moq::peering {
                 continue;
             }
 
-            if (step.open_stream) {
-                auto opened = step.session->CreateStream(data_header.priority);
-                std::shared_ptr<QuicStream> discard;
-                {
-                    std::lock_guard lock(info_base_->mutex_);
-                    const auto fib = info_base_->peer_fib_.find({ peer_session_id, data_header.sns_id });
-                    if (fib == info_base_->peer_fib_.end() || opened == nullptr) {
-                        discard = std::move(opened);
-                    } else if (const auto entry = fib->second.find(step.egress_id); entry == fib->second.end()) {
-                        discard = std::move(opened);
-                    } else {
-                        const auto [inserted_it, inserted] = entry->second.streams.try_emplace(step.key, opened);
-                        if (!inserted) {
-                            discard = std::move(opened);
-                        }
-                        step.stream = inserted_it->second;
-                    }
-                }
-                if (discard) {
-                    step.session->CloseStream(discard, StreamClose::kReset);
-                }
-                if (step.stream == nullptr) {
-                    continue;
-                }
+            auto session = step.session;
+            if (!session) {
+                continue;
             }
+            // Opening the egress stream has to run on that connection's packet thread. Doing it
+            // from the ingress thread and waiting deadlocks when the egress thread is forwarding
+            // the other direction back here.
+            session->OnConnectionThread(
+              [this, peer_session_id, data_header, eflags, step = std::move(step)]() mutable {
+                  if (step.open_stream) {
+                      auto opened = step.session->CreateStream(data_header.priority);
+                      std::shared_ptr<QuicStream> discard;
+                      {
+                          std::lock_guard lock(info_base_->mutex_);
+                          const auto fib = info_base_->peer_fib_.find({ peer_session_id, data_header.sns_id });
+                          if (fib == info_base_->peer_fib_.end() || opened == nullptr) {
+                              discard = std::move(opened);
+                          } else if (const auto entry = fib->second.find(step.egress_id); entry == fib->second.end()) {
+                              discard = std::move(opened);
+                          } else {
+                              const auto [inserted_it, inserted] = entry->second.streams.try_emplace(step.key, opened);
+                              if (!inserted) {
+                                  discard = std::move(opened);
+                              }
+                              step.stream = inserted_it->second;
+                          }
+                      }
+                      if (discard) {
+                          step.session->CloseStream(discard, StreamClose::kReset);
+                      }
+                      if (step.stream == nullptr) {
+                          return;
+                      }
+                  }
 
-            step.session->SendData(data_header.priority, data_header.ttl, step.stream, eflags, std::move(step.data));
+                  step.session->SendData(
+                    data_header.priority, data_header.ttl, step.stream, eflags, std::move(step.data));
+              });
         }
     }
 
@@ -823,42 +834,47 @@ namespace moq::peering {
         }
 
         for (auto& out : outgoing) {
-            if (out.open_stream) {
-                auto opened = out.session->CreateStream(priority);
-                std::shared_ptr<QuicStream> discard;
-                {
-                    std::lock_guard lock(info_base_->mutex_);
-                    const auto fib = info_base_->client_fib_.find({ track_full_name_hash, out.session_id });
-                    if (fib == info_base_->client_fib_.end() || opened == nullptr) {
-                        discard = std::move(opened);
-                    } else {
-                        const auto [inserted_it, inserted] = fib->second.streams.try_emplace(out.key, opened);
-                        if (!inserted) {
-                            discard = std::move(opened);
-                        }
-                        out.stream = inserted_it->second;
-
-                        SPDLOG_LOGGER_TRACE(LOGGER,
-                                            "Data object send, peer_session: {} egress SNS_ID: {} tfn_hash: {} "
-                                            "group_id: {} subgroup_id: {} streams: {} data len: {}",
-                                            out.session->GetSessionId(),
-                                            out.sns_id,
-                                            track_full_name_hash,
-                                            group_id,
-                                            subgroup_id,
-                                            fib->second.streams.size(),
-                                            out.data->size());
-                    }
-                }
-                if (discard) {
-                    out.session->CloseStream(discard, StreamClose::kReset);
-                }
-                if (out.stream == nullptr) {
-                    continue;
-                }
+            auto session = out.session;
+            if (!session) {
+                continue;
             }
+            session->OnConnectionThread(
+              [this, track_full_name_hash, priority, ttl, eflags, out = std::move(out)]() mutable {
+                  if (out.open_stream) {
+                      auto opened = out.session->CreateStream(priority);
+                      std::shared_ptr<QuicStream> discard;
+                      {
+                          std::lock_guard lock(info_base_->mutex_);
+                          const auto fib = info_base_->client_fib_.find({ track_full_name_hash, out.session_id });
+                          if (fib == info_base_->client_fib_.end() || opened == nullptr) {
+                              discard = std::move(opened);
+                          } else {
+                              const auto [inserted_it, inserted] = fib->second.streams.try_emplace(out.key, opened);
+                              if (!inserted) {
+                                  discard = std::move(opened);
+                              }
+                              out.stream = inserted_it->second;
 
-            out.session->SendData(priority, ttl, out.stream, eflags, out.data);
+                              SPDLOG_LOGGER_TRACE(LOGGER,
+                                                  "Data object send, peer_session: {} egress SNS_ID: {} tfn_hash: {} "
+                                                  "streams: {} data len: {}",
+                                                  out.session->GetSessionId(),
+                                                  out.sns_id,
+                                                  track_full_name_hash,
+                                                  fib->second.streams.size(),
+                                                  out.data->size());
+                          }
+                      }
+                      if (discard) {
+                          out.session->CloseStream(discard, StreamClose::kReset);
+                      }
+                      if (out.stream == nullptr) {
+                          return;
+                      }
+                  }
+
+                  out.session->SendData(priority, ttl, out.stream, eflags, out.data);
+              });
         }
     }
 
@@ -1476,14 +1492,54 @@ namespace moq::peering {
         }
     }
 
+    void Engine::RecomputeBestPaths()
+    {
+        std::vector<NodeIdValueType> changed;
+        {
+            std::lock_guard lock(info_base_->mutex_);
+            std::vector<NodeIdValueType> ids;
+            NodeIdValueType previous{ 0 };
+            bool any{ false };
+            for (const auto& [key, _] : info_base_->nodes_) {
+                if (!any || key.first != previous) {
+                    ids.push_back(key.first);
+                    previous = key.first;
+                    any = true;
+                }
+            }
+            for (const auto id : ids) {
+                if (info_base_->SelectBestNode(id)) {
+                    changed.push_back(id);
+                }
+            }
+        }
+
+        for (const auto id : changed) {
+            MoveSubscriberToBest(id);
+        }
+    }
+
     void Engine::UpdateSessionMetric(const std::shared_ptr<PeerSession>& session, std::uint64_t metric)
     {
         const auto before = session->AdvertisedMetric();
         session->SetSessionMetric(metric);
-        if (session->AdvertisedMetric() == before || session->Status() != PeerSession::StatusValue::kConnected) {
+        if (session->AdvertisedMetric() == before) {
             return;
         }
 
+        // The local table has to move before the advertisement, so subscribers leave this session
+        // even if the peer has not applied the new metric yet.
+        RecomputeBestPaths();
+
+        if (session->Status() != PeerSession::StatusValue::kConnected) {
+            return;
+        }
+
+        SPDLOG_LOGGER_INFO(LOGGER,
+                           "Advertising node metric {} on peer session {} (was {})",
+                           session->AdvertisedMetric(),
+                           session->GetSessionId(),
+                           before);
         session->SendNodeInfo(session->LocalNodeAdvertisement());
         std::lock_guard lock(mutex_);
         SendKnownNodes(*session);

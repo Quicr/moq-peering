@@ -22,6 +22,21 @@ namespace moq::peering {
             }
             return true;
         }
+
+        /// Received path sum, plus the extra cost of egressing on a session whose metric is above the node metric.
+        uint64_t SelectionCost(const NodeInfo& info, const std::shared_ptr<PeerSession>& session)
+        {
+            auto cost = info.SumMetric();
+            if (!session) {
+                return cost;
+            }
+            const auto advertised = session->AdvertisedMetric();
+            const auto base = session->node_info_.metric;
+            if (advertised > base) {
+                cost += advertised - base;
+            }
+            return cost;
+        }
     } // namespace
 
     ForwardingBase::NodeAddResult ForwardingBase::AddNode(std::shared_ptr<PeerSession> peer_session,
@@ -388,15 +403,16 @@ namespace moq::peering {
              *
              * Choose the node that first matches the below in the order defined:
              *
-             * 1. Prefer the lower sum of metrics. The sum is the node metric plus each hop.
+             * 1. Prefer the lower sum of metrics. The sum is the node metric plus each hop,
+             *    plus any extra metric configured on the peering session used as the next hop.
              * 2. When the metric sums are equal, prefer fewer hops.
              * 3. When the hop counts are equal, prefer the lower total sRTT.
              *
              * Equal metric, hop count, and sRTT keep the peer already selected, so a repeated
              * advertisement does not move streams.
              */
-            const auto candidate_metric = node_item.node_info.SumMetric();
-            const auto best_metric = best_node_info.SumMetric();
+            const auto candidate_metric = SelectionCost(node_item.node_info, candidate);
+            const auto best_metric = SelectionCost(best_node_info, best_peer_session.lock());
             const auto candidate_hops = node_item.node_info.path.size();
             const auto best_hops = best_node_info.path.size();
             const bool lower_metric = candidate_metric < best_metric;

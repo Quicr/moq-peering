@@ -69,6 +69,9 @@ namespace moq::peering {
         uint64_t RttUs() const;
 
         void SetHandlers(Handlers handlers);
+        /// Run fn on this connection's packet thread. Another packet thread queues fn and returns.
+        /// Waiting there deadlocks when two sessions forward a new stream to each other.
+        void Invoke(std::function<void()> fn);
         std::shared_ptr<QuicStream> OpenBidirectional(uint8_t priority);
         std::shared_ptr<QuicStream> OpenUnidirectional(uint8_t priority);
         void Send(uint64_t stream_id, std::span<const uint8_t> data, bool fin);

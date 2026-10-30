@@ -108,7 +108,7 @@ namespace moq::peering {
             peer.node_type = remote_node_info_.type;
         }
         peer.srtt_us = metrics_.srtt_us;
-        peer.metric = session_metric_;
+        peer.metric = session_metric_.load();
         peer.node_metric = AdvertisedMetric();
         peer.connect_time_us = status_ == StatusValue::kConnected ? metrics_.connect_time_us : 0;
         return peer;
@@ -116,8 +116,9 @@ namespace moq::peering {
 
     std::uint64_t PeerSession::AdvertisedMetric() const
     {
-        if (session_metric_ > node_info_.metric) {
-            return session_metric_;
+        const auto configured = session_metric_.load();
+        if (configured > node_info_.metric) {
+            return configured;
         }
         return node_info_.metric;
     }
@@ -137,7 +138,7 @@ namespace moq::peering {
 
     void PeerSession::SetSessionMetric(std::uint64_t metric)
     {
-        session_metric_ = metric;
+        session_metric_.store(metric);
     }
 
     void PeerSession::MarkDisconnected()
@@ -383,6 +384,14 @@ namespace moq::peering {
         }
 
         return connection_->OpenUnidirectional(priority);
+    }
+
+    void PeerSession::OnConnectionThread(std::function<void()> fn) const
+    {
+        if (!IsUsable()) {
+            return;
+        }
+        connection_->Invoke(std::move(fn));
     }
 
     void PeerSession::CloseStream(const std::shared_ptr<QuicStream>& stream, StreamClose flag)

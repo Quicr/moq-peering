@@ -116,6 +116,8 @@ namespace moq::peering {
                                uint16_t port,
                                std::optional<std::uint64_t> metric = std::nullopt);
         void UpdateSessionMetric(const std::shared_ptr<PeerSession>& session, std::uint64_t metric);
+        /// Run path selection again after a session metric changes and move subscribers whose next hop changed.
+        void RecomputeBestPaths();
         /// Caller holds mutex_. Sends stored nodes, appending this session's path metric.
         void SendKnownNodes(PeerSession& peer_session);
 

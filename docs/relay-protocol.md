@@ -810,7 +810,7 @@ Below is the current implemented selection algorithm:
 2. When the metric sums are equal, prefer the shortest path (fewer hops).
 3. When the hop counts are also equal, prefer the lowest sum of sRTT.
 
-A peering session metric replaces the local node metric in advertisements on that session only when the session value is greater. Equal metric, hop count, and sRTT keep the path already selected.
+A peering session metric replaces the local node metric in advertisements on that session only when the session value is greater. Changing it re-advertises this node and the nodes already known on that session. The node that sets the metric also adds the extra cost when it picks a next hop, and every node that receives the advertisement selects again, so subscriber paths leave that session when another path is cheaper. Equal metric, hop count, and sRTT keep the path already selected.
 
 ## Data Forwarding
 

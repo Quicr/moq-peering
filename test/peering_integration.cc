@@ -405,9 +405,17 @@ namespace {
             return app_.received.size();
         }
 
-        PeerAdminResult Add(const std::string& host, uint16_t port) { return node_->AddPeer(host, port); }
+        PeerAdminResult Add(const std::string& host, uint16_t port, std::optional<std::uint64_t> metric = std::nullopt)
+        {
+            return node_->AddPeer(host, port, metric);
+        }
 
         PeerAdminResult Remove(const std::string& host, uint16_t port) { return node_->RemovePeer(host, port); }
+
+        PeerAdminResult SetMetric(const std::string& host, uint16_t port, std::uint64_t metric)
+        {
+            return node_->SetPeerMetric(host, port, metric);
+        }
 
         void Send(std::uint64_t track_hash, DataType type, std::uint64_t group_id, std::vector<uint8_t> payload)
         {
@@ -816,4 +824,53 @@ TEST_CASE("Removing the direct peer sends the next subgroup both ways through th
     right.Send(right_hash, DataType::kNewStream, 2, Bytes("right-via"));
     REQUIRE_MESSAGE(right.WaitBytes(left_hash, "left-via", kWait), "left subgroup did not fall back through the via");
     REQUIRE_MESSAGE(left.WaitBytes(right_hash, "right-via", kWait), "right subgroup did not fall back through the via");
+}
+
+TEST_CASE("Raising a direct session metric moves the next subgroup onto the via")
+{
+    // left <-- via <-- right, then right dials left. Raising the metric right advertises on the
+    // direct session makes that path cost more than the via. Left, which receives the advertisement,
+    // sends the next subgroup to right through the via.
+    const TestIdentity identity;
+
+    Relay left("edge-left", NodeType::kEdge, {}, identity);
+    Relay via(
+      "via-mid", NodeType::kVia, std::vector<std::pair<std::string, uint16_t>>{ { "127.0.0.1", left.port() } }, identity);
+    Relay right("edge-right", NodeType::kEdge, { { "127.0.0.1", via.port() } }, identity);
+
+    const auto left_track = MakeTrack("edge-left", "live");
+    const auto right_track = MakeTrack("edge-right", "live");
+    const auto left_hash = PeerManager::HashTrack(left_track);
+    const auto right_hash = PeerManager::HashTrack(right_track);
+    Exchange(left, left_track, Bytes("from-left"), right, right_track, Bytes("from-right"));
+
+    const auto added = right.Add("127.0.0.1", left.port());
+    REQUIRE_MESSAGE(added.ok, added.message);
+    REQUIRE_MESSAGE(left.WaitSubscribeTracksAtLeast("edge-right", 1, kWait),
+                    "left did not move its track onto the direct peer");
+    REQUIRE_MESSAGE(right.WaitSubscribeTracksAtLeast("edge-left", 1, kWait),
+                    "right did not move its track onto the direct peer");
+
+    // Direct sum is the raised metric. The via sum is right's node metric plus via's hop, 200.
+    // Right also treats that session metric as a cost of using the direct next hop.
+    const auto raised = right.SetMetric("127.0.0.1", left.port(), 1000);
+    REQUIRE_MESSAGE(raised.ok, raised.message);
+
+    REQUIRE_MESSAGE(left.WaitSubscribeTracksAtLeast("via-mid", 1, kWait),
+                    "left did not move the next subgroup onto the via after the metric change");
+    REQUIRE_MESSAGE(left.WaitSubscribeTracks("edge-right", 0, kWait),
+                    "left kept the direct peer after it became the more expensive path");
+    REQUIRE_MESSAGE(right.WaitSubscribeTracksAtLeast("via-mid", 1, kWait),
+                    "right did not move the next subgroup onto the via after raising its session metric");
+    REQUIRE_MESSAGE(right.WaitSubscribeTracks("edge-left", 0, kWait),
+                    "right kept the direct peer after raising its session metric");
+    REQUIRE_MESSAGE(via.WaitBothWays("edge-left", kWait), "via is not forwarding both ways with left");
+    REQUIRE_MESSAGE(via.WaitBothWays("edge-right", kWait), "via is not forwarding both ways with right");
+
+    left.Send(left_hash, DataType::kNewStream, 1, Bytes("left-via"));
+    right.Send(right_hash, DataType::kNewStream, 1, Bytes("right-via"));
+    REQUIRE_MESSAGE(right.WaitBytes(left_hash, "left-via", kWait),
+                    "left subgroup did not arrive through the via after the metric change");
+    REQUIRE_MESSAGE(left.WaitBytes(right_hash, "right-via", kWait),
+                    "right subgroup did not arrive through the via after the metric change");
 }
