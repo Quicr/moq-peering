@@ -8,7 +8,7 @@ C++ library for Media Over QUIC peering. Relays use it to peer with each other o
 
 ## Documentation
 
-- [API](docs/api.md) — `PeerManager`, `Delegate`, and the calls an application makes
+- [API](docs/api.md) — `PeerManager`, `Delegate`, peer admin, and session stats
 - [Examples](docs/examples.md) — `moq_peering_relay`, `moq_peering_producer`, and `moq_peering_subscriber`, and how each one uses the API
 - [Peering protocol](docs/relay-protocol.md) — relay-to-relay wire protocol for Media Over QUIC peering
 
@@ -23,6 +23,10 @@ Methods the application calls:
 - `SendData` / `EndSubgroup` forward objects
 - `HasSubscribers` reports whether any peer still wants a track
 - `HashTrack` returns the full-name hash used by the calls above
+- `AddPeer` / `RemovePeer` / `RestartPeer` dial, drop, or reconnect a peer after startup
+- `SetPeerMetric` sets the cost advertised on one peering session when that cost is above `Config::node_metric` (default `100`)
+- `Peers` returns each accepted and dialed session, including smoothed RTT, metrics, subscribe and publish counts, and open streams
+- `LocalNodeId` is the numeric id assigned from `node_id` at startup. `FormatNodeId` prints it as `high.high:low.low`
 
 `moq::peering::Delegate` is the callback interface. Peering invokes it when a peer subscribes, withdraws,
 announces, delivers an object, or connects and disconnects. LAPS implements the delegate and translates

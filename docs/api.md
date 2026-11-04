@@ -14,6 +14,7 @@ Everything below is in namespace `moq::peering`. The wire format is described in
 - [Linking](#linking)
 - [Lifetime and threads](#lifetime-and-threads)
 - [Configuration](#configuration)
+- [Peers and metrics](#peers-and-metrics)
 - [Names and hashes](#names-and-hashes)
 - [Announcements](#announcements)
 - [Subscribes](#subscribes)
@@ -77,6 +78,7 @@ Announcements and subscribes made before a session is up are stored and sent whe
 struct Config {
     std::string node_id;
     NodeType node_type{ NodeType::kEdge };
+    std::uint64_t node_metric{ kDefaultNodeMetric };
     uint16_t listen_port{ 33434 };
     std::vector<std::pair<std::string, uint16_t>> peers;
 
@@ -94,8 +96,9 @@ struct Config {
 
 | Field | Meaning |
 | --- | --- |
-| `node_id` | Application label for this node. It is advertised as the contact string. The numeric node id is `std::hash<std::string>{}(node_id)`. Give every node a distinct string. This string is not parsed as the `<high>:<low>` form in the protocol note. |
+| `node_id` | Application label for this node. It is advertised as the contact string. The numeric node id is `std::hash<std::string>{}(node_id)`, returned by `LocalNodeId()`. Give every node a distinct string. This string is not parsed as the `<high>:<low>` form in the protocol note. |
 | `node_type` | `NodeType::kVia`, `kEdge` (default), or `kStub`. |
+| `node_metric` | Cost advertised for this node. Default `kDefaultNodeMetric` (`100`). A peering session uses its own metric on that session when the session value is greater. Lower path sums are preferred. The value is fixed when `PeerManager` is constructed. |
 | `listen_port` | UDP port for inbound peering. Default `33434`. |
 | `peers` | Outbound peers as `(host, port)`. An empty list means this node only accepts connections. |
 | `tls_cert_filename` | Path to the certificate file presented by this node. |
@@ -120,6 +123,7 @@ QUIC connections use the ALPN `moq-peering`. The transport does not configure a 
 moq::peering::Config config;
 config.node_id = "edge-sea-1";
 config.node_type = moq::peering::NodeType::kEdge;
+config.node_metric = moq::peering::kDefaultNodeMetric;
 config.listen_port = 33440;
 config.peers = { { "10.1.2.3", 33434 } };
 config.tls_cert_filename = "/etc/moq/cert.pem";
@@ -128,6 +132,134 @@ config.logger = spdlog::stdout_color_mt("edge-sea-1");
 config.logger->set_level(spdlog::level::info);
 
 moq::peering::PeerManager peers(config);
+```
+
+## Peers and metrics
+
+```cpp
+inline constexpr std::uint64_t kDefaultNodeMetric = 100;
+
+std::uint64_t LocalNodeId() const;
+std::string FormatNodeId(std::uint64_t id);
+
+std::vector<PeerSnapshot> Peers();
+
+PeerAdminResult AddPeer(const std::string& host,
+                        std::uint16_t port,
+                        std::optional<std::uint64_t> metric = std::nullopt);
+PeerAdminResult RemovePeer(const std::string& host, std::uint16_t port);
+PeerAdminResult SetPeerMetric(const std::string& host, std::uint16_t port, std::uint64_t metric);
+PeerAdminResult RestartPeer(const std::string& host, std::uint16_t port);
+```
+
+`LocalNodeId()` is the numeric id assigned at startup. It does not change later. `FormatNodeId` prints a numeric id as `high.high:low.low`, four 16-bit fields of that value. `FormatNodeId(peers.LocalNodeId())` prints the hash of `node_id` in that form. The `node_id` string remains the contact label.
+
+`Config::peers` is dialed during construction. Those sessions advertise `node_metric`. `AddPeer`, `RemovePeer`, `RestartPeer`, and `SetPeerMetric` change the peer set and the per-session cost after startup. They run on the application thread, the same as the other `PeerManager` methods.
+
+An address is a host and a port. Brackets around an IPv6 host are removed before the address is stored. A hostname and an address that resolve to the same host match. Result text for an IPv6 host uses `[host]:port`.
+
+```cpp
+struct PeerAdminResult {
+    bool ok{ false };
+    std::string host;
+    std::uint16_t port{ 0 };
+    std::optional<std::uint64_t> metric;
+    std::string action;
+    std::string message;
+};
+```
+
+| Field | Meaning |
+| --- | --- |
+| `ok` | True when the call applied. |
+| `host`, `port` | Address after brackets are removed. |
+| `metric` | Session metric carried by the call. Empty for `RemovePeer` and `RestartPeer`. |
+| `action` | `added`, `removed`, `metric`, or `restarted` when `ok` is true. Empty when the call does not apply. |
+| `message` | Text also written to the peering log. |
+
+| Call | What it does |
+| --- | --- |
+| `AddPeer` | Dials `host:port`. An address that is already dialed leaves `ok` false and sets `message` to `duplicate peer <host>:<port>`. An accepted session from that host stays up, the address is remembered, and this node dials it if that inbound session closes. A `metric` argument is stored on the accepted session. Success sets `action` to `added`. The message is `Added peer <host>:<port>`, or `Added peer <host>:<port> but it is already accepted as inbound`. |
+| `RemovePeer` | Disconnects the dialed session at that host and port, and any accepted session from that host. Forwarding state for those sessions is dropped. A missing address leaves `ok` false and sets `message` to `peer <host>:<port> does not exist`. Success sets `action` to `removed` and `message` to `Removed peer <host>:<port>`. |
+| `SetPeerMetric` | Stores `metric` on the matching dialed session and on any accepted session from that host. The session value is written into this node's advertisements on that session when it is greater than `node_metric`. When the advertised cost changes, best paths are recomputed and the new cost is advertised again. An address with no session and no remembered inbound dial uses the same does-not-exist message. A remembered address keeps the new metric for the later dial. Success sets `action` to `metric` and `message` to `Set peer <host>:<port> metric to <metric>`. |
+| `RestartPeer` | Drops the connection and its forwarding state. A dialed peer is connected again. An accepted peer is disconnected, and a remembered address is dialed after that inbound session closes. Success sets `action` to `restarted`. `message` is one sentence per matching session, joined by `. `. A session that is already down contributes `Peer <host>:<port> is not connected`. A dialed restart contributes `Restarted peer <host>:<port>`. An accepted restart contributes `Disconnected peer <host>:<port> because it was accepted as inbound`. |
+
+A host that does not resolve is logged, left disconnected, and dialed again on the reconnect interval. These four calls do not throw for a duplicate, a missing address, or a resolve failure.
+
+```cpp
+const auto added = peers.AddPeer("10.1.2.3", 33434, /*metric=*/150);
+if (added.ok) {
+    // added.action == "added"
+}
+
+peers.SetPeerMetric("10.1.2.3", 33434, 200);
+peers.RestartPeer("10.1.2.3", 33434);
+peers.RemovePeer("10.1.2.3", 33434);
+```
+
+### Path cost
+
+For each remote node, the forwarding table keeps the peer session with the best path. A candidate replaces the current choice when it is better on the first of these tests:
+
+1. Lower sum of metrics. The sum is the advertised node metric plus each hop, plus the amount by which the next-hop session metric exceeds the node metric.
+2. Equal sums, and fewer hops.
+3. Equal sums and hop counts, and a lower total smoothed RTT.
+
+Equal metric, hop count, and RTT leave the current peer in place. When a better peer is chosen, objects already on an open subgroup stream stay on the previous peer until that stream ends. A new stream and a datagram use the new peer.
+
+### Peer snapshot
+
+`Peers()` returns a copy of every accepted session and every session this node dialed, including the latest smoothed RTT. The copy is safe to read after the call returns.
+
+```cpp
+enum class PeerOrigin : std::uint8_t { kAccepted = 0, kDialed };
+enum class PeerLinkStatus : std::uint8_t { kConnecting = 0, kConnected, kDisconnected };
+
+struct PeerSnapshot {
+    std::uint64_t session_id{ 0 };
+    PeerOrigin origin{ PeerOrigin::kAccepted };
+    PeerLinkStatus status{ PeerLinkStatus::kConnecting };
+    std::string host;
+    std::uint16_t port{ 0 };
+    bool identified{ false };
+    std::uint64_t node_id{ 0 };
+    std::string contact;
+    NodeType node_type{ NodeType::kEdge };
+    std::uint64_t srtt_us{ 0 };
+    std::uint64_t metric{ 0 };
+    std::uint64_t node_metric{ 0 };
+    std::uint64_t connect_time_us{ 0 };
+    std::uint64_t subscribe_tracks{ 0 };
+    std::uint64_t publishes{ 0 };
+    std::uint64_t active_streams{ 0 };
+};
+```
+
+| Field | Meaning |
+| --- | --- |
+| `session_id` | QUIC connection id. The same value passed to `OnPeerUp` and `OnPeerDown`. Zero when the session has no connection. |
+| `origin` | `PeerOrigin::kAccepted` when this node accepted the connection. `kDialed` when this node opened it. |
+| `status` | `PeerLinkStatus::kConnecting`, `kConnected`, or `kDisconnected`. |
+| `host`, `port` | Remote address of the session. |
+| `identified` | True after the peering handshake has supplied the remote contact string. `node_id`, `contact`, and `node_type` are filled then. |
+| `srtt_us` | Smoothed RTT in microseconds. Zero when the connection has no sample yet. |
+| `metric` | Session metric from `AddPeer` or `SetPeerMetric`. Zero when neither call set one. |
+| `node_metric` | Metric written into this node's advertisements on this session. |
+| `connect_time_us` | Unix time in microseconds when the current attempt became connected. Zero while the session is connecting or disconnected. |
+| `subscribe_tracks` | Tracks this relay is forwarding to the peer because of a subscribe. |
+| `publishes` | Tracks arriving from the peer that this relay is forwarding onward. |
+| `active_streams` | QUIC streams currently open on the session: the control stream, object streams received from the peer, and object streams this relay has opened toward the peer. |
+
+```cpp
+for (const auto& peer : peers.Peers()) {
+    if (peer.status != moq::peering::PeerLinkStatus::kConnected || !peer.identified) {
+        continue;
+    }
+
+    const auto remote = moq::peering::FormatNodeId(peer.node_id);
+    // remote, peer.contact, peer.srtt_us, peer.node_metric,
+    // peer.subscribe_tracks, peer.publishes, peer.active_streams
+}
 ```
 
 ## Names and hashes
@@ -555,7 +687,7 @@ Pass certificate and key paths. `make cert` writes a development pair under `bui
 
 `PeerManager`'s constructor throws `std::runtime_error` when the QUIC context cannot be created, the network thread cannot start, or the listen port cannot be bound. A missing or unreadable certificate or key produces `Failed to create picoquic context; check the certificate and key files`. A port already in use produces `picoquic network thread failed to bind`.
 
-An outbound host that does not resolve throws `Failed to resolve peering peer` plus the host name.
+An outbound host that does not resolve is logged as `Failed to connect to peer`, left disconnected, and dialed again on `check_interval_ms`. `AddPeer` still returns `ok == true` for that address. `AddPeer`, `RemovePeer`, `SetPeerMetric`, and `RestartPeer` leave `ok` false for a duplicate or a missing address and put the reason in `message`.
 
 ```cpp
 try {
@@ -566,7 +698,7 @@ try {
 }
 ```
 
-`Subscribe`, `Announce`, `SendData`, and `EndSubgroup` do not throw for "no peer" or "no subscriber". Those calls update local state or do nothing until a session and a subscribe exist.
+`Subscribe`, `Announce`, `SendData`, `EndSubgroup`, and the peer admin calls do not throw for "no peer" or "no subscriber". Announce, subscribe, and send update local state or do nothing until a session and a subscribe exist. Admin calls report that outcome in `PeerAdminResult`.
 
 `UpdateSubscribe` and `Unsubscribe` do nothing when this node has no matching local subscribe. `SendData` with `kExistingStream` does nothing for a `(group_id, subgroup_id)` pair that has no open stream. `EndSubgroup` does nothing when that pair has no stream.
 
