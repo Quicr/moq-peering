@@ -399,6 +399,22 @@ namespace {
             return app_.subscribes.contains(track_hash);
         }
 
+        int SubscribeCount(std::uint64_t track_hash)
+        {
+            std::lock_guard lock(app_.mu);
+            const auto it = app_.subscribes.find(track_hash);
+            return it == app_.subscribes.end() ? 0 : it->second;
+        }
+
+        bool WaitSubscribeCount(std::uint64_t track_hash, int minimum, std::chrono::milliseconds timeout)
+        {
+            std::unique_lock lock(app_.mu);
+            return app_.cv.wait_for(lock, timeout, [&] {
+                const auto it = app_.subscribes.find(track_hash);
+                return it != app_.subscribes.end() && it->second >= minimum;
+            });
+        }
+
         std::size_t PayloadCount()
         {
             std::lock_guard lock(app_.mu);
@@ -411,6 +427,8 @@ namespace {
         }
 
         PeerAdminResult Remove(const std::string& host, uint16_t port) { return node_->RemovePeer(host, port); }
+
+        PeerAdminResult Restart(const std::string& host, uint16_t port) { return node_->RestartPeer(host, port); }
 
         PeerAdminResult SetMetric(const std::string& host, uint16_t port, std::uint64_t metric)
         {
@@ -873,4 +891,39 @@ TEST_CASE("Raising a direct session metric moves the next subgroup onto the via"
                     "left subgroup did not arrive through the via after the metric change");
     REQUIRE_MESSAGE(left.WaitBytes(right_hash, "right-via", kWait),
                     "right subgroup did not arrive through the via after the metric change");
+}
+
+TEST_CASE("Restarting the edge peer resumes both publishes")
+{
+    // left <-- via <-- right. Both edges publish and subscribe. Restarting right's session
+    // has to advertise the tracks again and deliver the next subgroup both ways.
+    const TestIdentity identity;
+
+    Relay left("edge-left", NodeType::kEdge, {}, identity);
+    Relay via(
+      "via-mid", NodeType::kVia, std::vector<std::pair<std::string, uint16_t>>{ { "127.0.0.1", left.port() } }, identity);
+    Relay right("edge-right", NodeType::kEdge, { { "127.0.0.1", via.port() } }, identity);
+
+    const auto left_track = MakeTrack("edge-left", "live");
+    const auto right_track = MakeTrack("edge-right", "live");
+    const auto left_hash = PeerManager::HashTrack(left_track);
+    const auto right_hash = PeerManager::HashTrack(right_track);
+    Exchange(left, left_track, Bytes("from-left"), right, right_track, Bytes("from-right"));
+
+    const auto restarted = right.Restart("127.0.0.1", via.port());
+    REQUIRE_MESSAGE(restarted.ok, restarted.message);
+
+    REQUIRE_MESSAGE(left.WaitTrack(right_track, kWait), "left did not learn right's track after the peer restarted");
+    REQUIRE_MESSAGE(right.WaitTrack(left_track, kWait), "right did not learn left's track after the peer restarted");
+    REQUIRE_MESSAGE(left.WaitSubscribeCount(left_hash, 2, kWait),
+                    "left was not asked to publish again after the peer restarted");
+    REQUIRE_MESSAGE(right.WaitSubscribeCount(right_hash, 2, kWait),
+                    "right was not asked to publish again after the peer restarted");
+
+    left.Send(left_hash, DataType::kNewStream, 2, Bytes("left-restored"));
+    right.Send(right_hash, DataType::kNewStream, 2, Bytes("right-restored"));
+    REQUIRE_MESSAGE(right.WaitBytes(left_hash, "left-restored", kWait),
+                    "left subgroup did not resume after the peer restarted");
+    REQUIRE_MESSAGE(left.WaitBytes(right_hash, "right-restored", kWait),
+                    "right subgroup did not resume after the peer restarted");
 }

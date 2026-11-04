@@ -209,6 +209,7 @@ namespace moq::peering {
          */
         if (not withdraw) {
             uint64_t update_ref = rand();
+            bool path_ready{ false };
 
             const auto priority = subscribe_info.details.priority;
             auto bp_it = info_base_->nodes_best_.find(subscribe_info.track.source_node_id);
@@ -227,6 +228,7 @@ namespace moq::peering {
                                                                subscribe_info.track.source_node_id,
                                                                priority);
                         is_new) {
+                        path_ready = true;
                         SPDLOG_LOGGER_INFO(
                           LOGGER,
                           "New source added to peer session for subscribe fullname: {} source_node: {} is "
@@ -237,19 +239,16 @@ namespace moq::peering {
                           sns_id);
 
                         // Key is the egress session. SendData uses that session, and withdraw removes it.
-                        if (auto [_, inserted] = info_base_->client_fib_.try_emplace(
-                              { subscribe_info.details.track_hash.track_fullname_hash, best_session->GetSessionId() },
-                              ForwardingBase::FibEntry{ update_ref, {}, sns_id, bp_it->second });
-                            inserted) {
-                            SPDLOG_LOGGER_INFO(LOGGER,
-                                               "New subscribe fullname: {}, sending subscribe to client manager",
-                                               subscribe_info.details.track_hash.track_fullname_hash);
-                        }
+                        info_base_->client_fib_.try_emplace(
+                          { subscribe_info.details.track_hash.track_fullname_hash, best_session->GetSessionId() },
+                          ForwardingBase::FibEntry{ update_ref, {}, sns_id, bp_it->second });
                     }
                 }
             }
 
-            if (is_updated) {
+            // A restored session sends the same subscribe again. The record is not new, but the
+            // forwarding path is, and the publisher has to start sending onto it.
+            if (is_updated || path_ready) {
                 if (auto* delegate = LoadDelegate()) {
                     SPDLOG_LOGGER_DEBUG(LOGGER,
                                         "Notifying delegate of subscribe fullname: {} new_group_request: {}",
@@ -383,6 +382,19 @@ namespace moq::peering {
                 sess.second->SendAnnounceInfo(announce_info, withdraw);
         }
 
+        // A session drop withdraws announces whose source node is already gone. The client
+        // manager keeps that publish: the same node advertises it again when the peer returns.
+        // An explicit withdraw arrives while the source is still reachable, and that one is delivered.
+        bool source_reachable = announce_info.track.source_node_id == node_info_.id;
+        if (!source_reachable) {
+            std::lock_guard lock(info_base_->mutex_);
+            source_reachable = info_base_->nodes_best_.contains(announce_info.track.source_node_id);
+        }
+
+        if (withdraw && !source_reachable) {
+            return;
+        }
+
         if (auto* delegate = LoadDelegate()) {
             const auto name = ToTrackName(announce_info.track.name_space, announce_info.track.name);
             if (announce_info.details.flags & 1) {
@@ -512,7 +524,25 @@ namespace moq::peering {
                 }
 
                 if (remove_announce) {
-                    info_base_->announces_.clear();
+                    // Announcements learned from peers are already withdrawn with those nodes.
+                    // This node's own announcements stay, so the next session advertises them
+                    // and the client manager starts the publish again.
+                    std::lock_guard lock(info_base_->mutex_);
+                    for (auto it = info_base_->announces_.begin(); it != info_base_->announces_.end();) {
+                        auto& by_source = it->second;
+                        for (auto source = by_source.begin(); source != by_source.end();) {
+                            if (source->first == node_info_.id) {
+                                ++source;
+                            } else {
+                                source = by_source.erase(source);
+                            }
+                        }
+                        if (by_source.empty()) {
+                            it = info_base_->announces_.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
                 }
 
                 break;
