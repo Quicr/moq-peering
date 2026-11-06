@@ -63,6 +63,7 @@ namespace moq::peering {
         auto it = serialized_data.begin();
         const auto end = serialized_data.end();
 
+        details.epoch = Read<uint16_t>(it, end);
         details.seq = Read<uint16_t>(it, end);
         track.source_node_id = Read<uint64_t>(it, end);
 
@@ -109,7 +110,8 @@ namespace moq::peering {
     template<>
     uint32_t SubscribeInfo::SizeBytes() const
     {
-        return sizeof(details.seq) + sizeof(track.source_node_id) + 24 /* namespace, name, and full name hashes */
+        return sizeof(details.epoch) + sizeof(details.seq) + sizeof(track.source_node_id) +
+               24 /* namespace, name, and full name hashes */
                + sizeof(details.priority) + sizeof(details.delivery_timeout) + sizeof(details.expires) +
                sizeof(details.forward) + 1 /* new group present */
                + (details.new_group_request_id.has_value() ? sizeof(uint64_t) : 0) + NameSize(track);
@@ -133,6 +135,7 @@ namespace moq::peering {
             data.reserve(size);
         }
 
+        Append(data, details.epoch);
         Append(data, details.seq);
         Append(data, track.source_node_id);
         Append(data, details.track_hash.track_namespace_hash);

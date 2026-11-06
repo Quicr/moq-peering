@@ -17,7 +17,9 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <filesystem>
 #include <set>
 
 #define LOGGER config_.logger
@@ -42,6 +44,31 @@ namespace moq::peering {
             params.forward = static_cast<uint8_t>(info.details.forward);
             params.new_group_request_id = info.details.new_group_request_id;
             return params;
+        }
+
+        std::filesystem::path SubscribeSequencePath(const Config& config)
+        {
+            std::string safe;
+            safe.reserve(config.node_id.size());
+            for (unsigned char c : config.node_id) {
+                if (std::isalnum(c) || c == '-' || c == '_') {
+                    safe.push_back(static_cast<char>(c));
+                } else {
+                    safe.push_back('_');
+                }
+            }
+            if (safe.empty()) {
+                safe = "node";
+            }
+
+            const auto file = "subscribe-seq-" + safe;
+            if (!config.tls_cert_filename.empty()) {
+                const auto parent = std::filesystem::path(config.tls_cert_filename).parent_path();
+                if (!parent.empty()) {
+                    return parent / file;
+                }
+            }
+            return std::filesystem::temp_directory_path() / file;
         }
 
         TrackName ToTrackName(const NameSpace& name_space, const std::vector<uint8_t>& name)
@@ -124,6 +151,7 @@ namespace moq::peering {
                 auto adv_node_info = node_info;
                 adv_node_info.path.push_back(peer_session->ForwardPathItem());
                 PropagateNodeInfo(adv_node_info, true);
+                ForwardWithdrawnSource(peer_session_id, node_info.id);
             }
         }
     } catch (const std::exception&) {
@@ -151,7 +179,10 @@ namespace moq::peering {
         return false;
     }
 
-    void Engine::SubscribeInfoReceived(PeerSessionId peer_session_id, SubscribeInfo& subscribe_info, bool withdraw)
+    void Engine::SubscribeInfoReceived(PeerSessionId peer_session_id,
+                                        SubscribeInfo& subscribe_info,
+                                        bool withdraw,
+                                        bool ignore_sequence)
     try {
         SPDLOG_LOGGER_INFO(
           LOGGER,
@@ -171,10 +202,6 @@ namespace moq::peering {
                    client_it != client_peer_sessions_.end()) {
             peer_session = client_it->second;
         }
-        if (!peer_session) {
-            return;
-        }
-
         // A relay learns its own subscribe again when two sessions exist toward the next hop.
         // Installing that echo as a forwarding entry makes HasSubscribers stay true after the
         // local client leaves, so the upstream subscribe is never withdrawn and the publisher
@@ -187,19 +214,28 @@ namespace moq::peering {
             return;
         }
 
-        const auto is_updated =
-          withdraw ? info_base_->RemoveSubscribe(subscribe_info) : info_base_->AddSubscribe(subscribe_info);
+        // A live session is required to accept a new advertisement. Retiring a source that has
+        // already left the node table still drops the entry when the session is already gone.
+        if (!peer_session && !ignore_sequence) {
+            return;
+        }
 
-        if (is_updated) {
-            for (const auto& sess : client_peer_sessions_) {
-                if (peer_session_id != sess.first)
-                    sess.second->SendSubscribeInfo(subscribe_info, withdraw);
-            }
+        const auto is_updated = withdraw ? info_base_->RemoveSubscribe(subscribe_info, ignore_sequence)
+                                         : info_base_->AddSubscribe(subscribe_info);
 
-            for (const auto& sess : server_peer_sessions_) {
-                if (peer_session_id != sess.first)
-                    sess.second->SendSubscribeInfo(subscribe_info, withdraw);
-            }
+        if (!is_updated) {
+            // Equal or older than the stored sequence. A delayed update must not change forwarding.
+            return;
+        }
+
+        for (const auto& sess : client_peer_sessions_) {
+            if (peer_session_id != sess.first)
+                sess.second->SendSubscribeInfo(subscribe_info, withdraw);
+        }
+
+        for (const auto& sess : server_peer_sessions_) {
+            if (peer_session_id != sess.first)
+                sess.second->SendSubscribeInfo(subscribe_info, withdraw);
         }
 
         /*
@@ -458,9 +494,10 @@ namespace moq::peering {
                     }
                 }
 
-                std::vector<NodeIdValueType> gone;
+                ForwardingBase::SessionPurge purged;
                 if (!stop_)
-                    gone = info_base_->PurgePeerSessionInfo(peer_session_id);
+                    purged = info_base_->PurgePeerSessionInfo(peer_session_id);
+                const auto& gone = purged.gone;
 
                 std::vector<SubscribeInfo> remove_sub;
                 {
@@ -475,7 +512,14 @@ namespace moq::peering {
                 }
 
                 for (auto& si : remove_sub) {
-                    SubscribeInfoReceived(peer_session_id, si, true);
+                    SubscribeInfoReceived(peer_session_id, si, true, true);
+                }
+
+                for (const auto& node : purged.nodes) {
+                    if (node.id == remote_node_info.id) {
+                        continue;
+                    }
+                    PropagateNodeInfo(node, true);
                 }
 
                 for (const auto node_id : was_best) {
@@ -977,8 +1021,7 @@ namespace moq::peering {
     void Engine::Unsubscribe(uint64_t track_fullname_hash)
     {
         if (auto si = info_base_->GetSubscribe(track_fullname_hash, node_info_.id)) {
-            info_base_->RemoveSubscribe(*si);
-
+            const auto seq_before = si->details.seq;
             for (const auto& sess : client_peer_sessions_) {
                 SPDLOG_LOGGER_DEBUG(LOGGER,
                                     "Sending subscribe withdraw fullname: {} peer_session_id: {}",
@@ -994,6 +1037,14 @@ namespace moq::peering {
                                     sess.first);
                 sess.second->SendSubscribeInfo(*si, true);
             }
+
+            // The withdrawal carries the next sequence. Keep that value after the entry is gone
+            // so a delayed advertisement cannot restore the subscribe.
+            AdvanceSeqIfUnchanged(*si, seq_before);
+            if (!info_base_->RemoveSubscribe(*si)) {
+                info_base_->RemoveSubscribe(*si, true);
+            }
+            SaveSubscribeSequences();
         }
     }
 
@@ -1036,6 +1087,7 @@ namespace moq::peering {
 
             AdvanceSeqIfUnchanged(*si, seq_before);
             info_base_->AddSubscribe(*si);
+            SaveSubscribeSequences();
         }
     }
 
@@ -1049,6 +1101,12 @@ namespace moq::peering {
         si.track.name_space = track_full_name.name_space;
         si.track.name = track_full_name.name;
         si.track.source_node_id = node_info_.id;
+        if (const auto previous = info_base_->StoredSequence(si.details.track_hash.track_fullname_hash, node_info_.id)) {
+            si.details.seq = *previous;
+        }
+        if (const auto epoch = info_base_->StoredEpoch(si.details.track_hash.track_fullname_hash, node_info_.id)) {
+            si.details.epoch = *epoch;
+        }
         ApplySubscribeAttributes(si, params);
 
         const auto seq_before = si.details.seq;
@@ -1070,6 +1128,7 @@ namespace moq::peering {
 
         AdvanceSeqIfUnchanged(si, seq_before);
         info_base_->AddSubscribe(si);
+        SaveSubscribeSequences();
     }
 
     void Engine::Announce(const TrackName& track_name, Announcement kind, bool withdraw)
@@ -1214,12 +1273,14 @@ namespace moq::peering {
         SPDLOG_LOGGER_INFO(
           LOGGER, "Peering manager Node ID: {} listening port: {}", config_.node_id, config_.listen_port);
 
-        check_thr_ = std::thread(&Engine::CheckThread, this, static_cast<int>(config_.check_interval_ms));
-
         node_info_.contact = config_.node_id;
         node_info_.id = std::hash<std::string>{}(config_.node_id);
         node_info_.type = config_.node_type;
         node_info_.metric = config_.node_metric;
+        info_base_->SetLocalNode(node_info_.id);
+        LoadSubscribeSequences();
+
+        check_thr_ = std::thread(&Engine::CheckThread, this, static_cast<int>(config_.check_interval_ms));
 
         server_endpoint_ = QuicEndpoint::Listen(config_.tls_cert_filename,
                                                 config_.tls_key_filename,
@@ -1685,6 +1746,58 @@ namespace moq::peering {
         return true;
     }
 
+    void Engine::LoadSubscribeSequences()
+    {
+        if (config_.node_id.empty()) {
+            return;
+        }
+
+        try {
+            const auto rows = LoadSubscribeSequenceFile(SubscribeSequencePath(config_));
+            for (const auto& row : rows) {
+                info_base_->SeedSequence(row.track_hash, node_info_.id, row.seq, row.epoch);
+            }
+        } catch (const std::exception&) {
+            // A missing or unreadable sequence file starts the counter at zero.
+        }
+    }
+
+    void Engine::SaveSubscribeSequences()
+    {
+        if (config_.node_id.empty()) {
+            return;
+        }
+
+        try {
+            const auto path = SubscribeSequencePath(config_);
+            const auto rows = info_base_->SequencesFor(node_info_.id);
+            std::error_code ec;
+            if (rows.empty() && !std::filesystem::exists(path, ec)) {
+                return;
+            }
+            SaveSubscribeSequenceFile(path, rows);
+        } catch (const std::exception&) {
+            // The in-memory sequence still works for this process.
+        }
+    }
+
+    void Engine::ForwardWithdrawnSource(PeerSessionId from, NodeIdValueType source)
+    {
+        std::vector<SubscribeInfo> withdrawn;
+        {
+            std::lock_guard lock(info_base_->mutex_);
+            for (const auto& [_, by_source] : info_base_->subscribes_) {
+                if (const auto it = by_source.find(source); it != by_source.end()) {
+                    withdrawn.push_back(it->second);
+                }
+            }
+        }
+
+        for (auto& info : withdrawn) {
+            SubscribeInfoReceived(from, info, true, true);
+        }
+    }
+
     void Engine::CheckThread(int interval_ms)
     {
         SPDLOG_LOGGER_INFO(LOGGER, "Running peer manager outbound peer connection thread");
@@ -1695,6 +1808,9 @@ namespace moq::peering {
         auto start = std::chrono::system_clock::now();
 
         while (not stop_) {
+            info_base_->ExpireSubscribeSequences(std::chrono::steady_clock::now());
+            SaveSubscribeSequences();
+
             auto check = std::chrono::system_clock::now();
 
             // Run check only after interval ms
@@ -2318,7 +2434,10 @@ namespace moq::peering {
         if (status != PeerSession::StatusValue::kDisconnected && map_key != 0) {
             SessionChanged(map_key, PeerSession::StatusValue::kDisconnected, remote);
         } else if (map_key != 0) {
-            info_base_->PurgePeerSessionInfo(map_key);
+            const auto purged = info_base_->PurgePeerSessionInfo(map_key);
+            for (const auto source : purged.gone) {
+                ForwardWithdrawnSource(map_key, source);
+            }
         }
 
         session->ClearLocalState();

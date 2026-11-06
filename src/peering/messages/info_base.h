@@ -26,12 +26,16 @@ namespace moq::peering {
     /**
      * @brief Fields that exist only on a subscribe
      *
-     * @details seq is an incremental sequence. A smaller value than the current one can be ignored, unless it wraps
-     *      through zero. The three track hashes and the subscribe parameters are encoded as fixed-width integers.
+     * @details epoch names the counter. seq orders updates inside that epoch. A wrap from 65535 to 0
+     *      is a continuation and leaves epoch unchanged. A reset increments epoch and starts seq at 0.
+     *      Sequence numbers are compared only when the epochs are equal. A different epoch is ignored
+     *      while the old epoch is retained. The three track hashes and the subscribe parameters are
+     *      encoded as fixed-width integers.
      *      new_group_request_id is preceded by a presence byte and omitted when unset.
      */
     struct SubscribeDetails
     {
+        uint16_t epoch{ 0 };
         uint16_t seq{ 0 };
         TrackHash track_hash;
         uint8_t priority{ 0 };
@@ -55,7 +59,7 @@ namespace moq::peering {
      * @brief One subscribe or one announce
      *
      * @details The track identity is the same for both kinds. Details and the wire encoding stay with the kind.
-     *      Subscribe bytes are sequence, node, three hashes, parameters, then the name. Announce bytes are node,
+     *      Subscribe bytes are epoch, sequence, node, three hashes, parameters, then the name. Announce bytes are node,
      *      one hash, the name, then flags.
      */
     template<typename Details>

@@ -4,6 +4,11 @@
 #include "forwarding_base.h"
 #include "name.h"
 
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <utility>
+
 namespace moq::peering {
     namespace {
         bool SameAdvertisement(const NodeInfo& left, const NodeInfo& right)
@@ -37,6 +42,13 @@ namespace moq::peering {
             }
             return cost;
         }
+
+        /// Distance 1..32767 through a 16-bit ring. Zero is newer than 65535.
+        bool SequenceIsNewer(std::uint16_t received, std::uint16_t stored)
+        {
+            const auto distance = static_cast<std::uint16_t>(received - stored);
+            return distance >= 1 && distance <= 32767;
+        }
     } // namespace
 
     ForwardingBase::NodeAddResult ForwardingBase::AddNode(std::shared_ptr<PeerSession> peer_session,
@@ -67,6 +79,7 @@ namespace moq::peering {
                 result.best_info_changed = !had_previous || !SameAdvertisement(previous, node_info);
             }
         }
+        NoteSourceReachableUnlocked(node_info.id);
         return result;
     }
 
@@ -90,22 +103,34 @@ namespace moq::peering {
             // TODO(tievens): Update subscribes and announces based on best change
         }
 
+        bool still_reachable{ false };
         for (const auto& entry : nodes_) {
             if (entry.first.first == node_id) {
-                return true;
+                still_reachable = true;
+                break;
             }
         }
-        return false;
+        if (!still_reachable) {
+            NoteSourceUnreachableUnlocked(node_id, std::chrono::steady_clock::now());
+        }
+        return still_reachable;
     }
 
-    std::vector<NodeIdValueType> ForwardingBase::PurgePeerSessionInfo(PeerSessionId peer_session_id)
+    ForwardingBase::SessionPurge ForwardingBase::PurgePeerSessionInfo(PeerSessionId peer_session_id)
     {
-        std::vector<NodeIdValueType> gone;
+        SessionPurge result;
         std::lock_guard _(mutex_);
 
         auto ids_it = nodes_by_peer_session_.find(peer_session_id);
         if (ids_it != nodes_by_peer_session_.end()) {
             for (const auto& node_id : ids_it->second) {
+                NodeInfo withdrawn;
+                bool have_info{ false };
+                if (const auto node_it = nodes_.find({ node_id, peer_session_id }); node_it != nodes_.end()) {
+                    withdrawn = node_it->second.node_info;
+                    have_info = true;
+                }
+
                 nodes_.erase({ node_id, peer_session_id });
 
                 if (nodes_best_.erase(node_id) > 0) {
@@ -120,7 +145,11 @@ namespace moq::peering {
                     }
                 }
                 if (!still_reachable) {
-                    gone.push_back(node_id);
+                    result.gone.push_back(node_id);
+                    if (have_info) {
+                        result.nodes.push_back(std::move(withdrawn));
+                    }
+                    NoteSourceUnreachableUnlocked(node_id, std::chrono::steady_clock::now());
                 }
             }
 
@@ -157,7 +186,7 @@ namespace moq::peering {
             }
         }
 
-        return gone;
+        return result;
     }
 
     bool ForwardingBase::HasSubscribers(const SubscribeInfo& subscribe_info)
@@ -177,43 +206,238 @@ namespace moq::peering {
     bool ForwardingBase::AddSubscribe(const SubscribeInfo& subscribe_info)
     {
         std::lock_guard _(mutex_);
+        ExpireSubscribeSequencesUnlocked(std::chrono::steady_clock::now());
 
-        auto it = subscribes_[subscribe_info.track.fullname_hash].find(subscribe_info.track.source_node_id);
-        if (it != subscribes_[subscribe_info.track.fullname_hash].end()) {
-            const int seq_diff = it->second.details.seq - subscribe_info.details.seq;
-            if (seq_diff == 0) {
-                // TODO(tievens): Revisit to check on order of received or delayed messages
-                return false; // ignore
+        const auto hash = subscribe_info.track.fullname_hash;
+        const auto source = subscribe_info.track.source_node_id;
+        const auto incoming_epoch = subscribe_info.details.epoch;
+        const auto incoming = subscribe_info.details.seq;
+        const auto key = std::make_pair(hash, source);
+
+        SubscribeInfo* existing = nullptr;
+        if (const auto track = subscribes_.find(hash); track != subscribes_.end()) {
+            if (const auto it = track->second.find(source); it != track->second.end()) {
+                existing = &it->second;
             }
-
-            it->second = subscribe_info;
-            return true;
         }
 
-        subscribes_[subscribe_info.track.fullname_hash].emplace(subscribe_info.track.source_node_id, subscribe_info);
+        if (const auto mark = subscribe_seq_.find(key); mark != subscribe_seq_.end()) {
+            // A different epoch is a reset. Sequence distance does not apply, and accepting it
+            // would cancel retention. 0 is greater than 65535 only inside the same epoch.
+            if (incoming_epoch != mark->second.epoch) {
+                return false;
+            }
+            const bool same = incoming == mark->second.seq;
+            // The source left and came back with the same counter. A withdrawal has already
+            // moved the stored sequence ahead of the old advertisement, so this cannot restore it.
+            const bool resume = same && !mark->second.withdrawn && existing == nullptr;
+            if (!SequenceIsNewer(incoming, mark->second.seq) && !resume) {
+                return false;
+            }
+        }
+
+        if (existing != nullptr) {
+            *existing = subscribe_info;
+        } else {
+            subscribes_[hash].emplace(source, subscribe_info);
+        }
+
+        auto& record = subscribe_seq_[key];
+        record.epoch = incoming_epoch;
+        record.seq = incoming;
+        record.withdrawn = false;
+        record.discard_at.reset();
         return true;
     }
 
-    bool ForwardingBase::RemoveSubscribe(const SubscribeInfo& subscribe_info)
+    bool ForwardingBase::RemoveSubscribe(const SubscribeInfo& subscribe_info, bool force)
     {
         std::lock_guard _(mutex_);
 
-        auto it = subscribes_.find(subscribe_info.track.fullname_hash);
-        if (it != subscribes_.end()) {
-            auto sub_it = it->second.find(subscribe_info.track.source_node_id);
-            if (sub_it != it->second.end()) {
-                // TODO(tievens): Revisit to check on order of received or delayed messages
-                it->second.erase(sub_it);
+        const auto hash = subscribe_info.track.fullname_hash;
+        const auto source = subscribe_info.track.source_node_id;
+        const auto incoming_epoch = subscribe_info.details.epoch;
+        const auto incoming = subscribe_info.details.seq;
+        const auto key = std::make_pair(hash, source);
 
-                if (it->second.empty()) {
-                    subscribes_.erase(it);
-                }
+        auto it = subscribes_.find(hash);
+        if (it == subscribes_.end()) {
+            return false;
+        }
 
-                return true;
+        auto sub_it = it->second.find(source);
+        if (sub_it == it->second.end()) {
+            return false;
+        }
+
+        auto stored_epoch = sub_it->second.details.epoch;
+        auto stored = sub_it->second.details.seq;
+        std::optional<std::chrono::steady_clock::time_point> discard_at;
+        if (const auto mark = subscribe_seq_.find(key); mark != subscribe_seq_.end()) {
+            stored_epoch = mark->second.epoch;
+            stored = mark->second.seq;
+            discard_at = mark->second.discard_at;
+        }
+
+        const bool same_epoch = incoming_epoch == stored_epoch;
+        const bool newer = same_epoch && SequenceIsNewer(incoming, stored);
+        if (!force && !newer) {
+            return false;
+        }
+
+        it->second.erase(sub_it);
+        if (it->second.empty()) {
+            subscribes_.erase(it);
+        }
+
+        auto& record = subscribe_seq_[key];
+        record.epoch = stored_epoch;
+        record.seq = newer ? incoming : stored;
+        // A source withdrawal moves the sequence forward inside the same epoch. Dropping the
+        // entry because the source left the node table keeps the last advertisement resumable.
+        record.withdrawn = !force;
+        record.discard_at = discard_at;
+        return true;
+    }
+
+    void ForwardingBase::SetLocalNode(NodeIdValueType node_id)
+    {
+        std::lock_guard _(mutex_);
+        local_node_id_ = node_id;
+    }
+
+    void ForwardingBase::NoteSourceUnreachable(NodeIdValueType source, std::chrono::steady_clock::time_point now)
+    {
+        std::lock_guard _(mutex_);
+        NoteSourceUnreachableUnlocked(source, now);
+    }
+
+    void ForwardingBase::NoteSourceReachable(NodeIdValueType source)
+    {
+        std::lock_guard _(mutex_);
+        NoteSourceReachableUnlocked(source);
+    }
+
+    void ForwardingBase::ExpireSubscribeSequences(std::chrono::steady_clock::time_point now)
+    {
+        std::lock_guard _(mutex_);
+        ExpireSubscribeSequencesUnlocked(now);
+    }
+
+    std::optional<std::uint16_t> ForwardingBase::StoredSequence(std::uint64_t track_fullname_hash,
+                                                               NodeIdValueType source)
+    {
+        std::lock_guard _(mutex_);
+        ExpireSubscribeSequencesUnlocked(std::chrono::steady_clock::now());
+        const auto mark = subscribe_seq_.find({ track_fullname_hash, source });
+        if (mark == subscribe_seq_.end()) {
+            return std::nullopt;
+        }
+        return mark->second.seq;
+    }
+
+    std::optional<std::uint16_t> ForwardingBase::StoredEpoch(std::uint64_t track_fullname_hash, NodeIdValueType source)
+    {
+        std::lock_guard _(mutex_);
+        ExpireSubscribeSequencesUnlocked(std::chrono::steady_clock::now());
+
+        const auto mark = subscribe_seq_.find({ track_fullname_hash, source });
+        if (mark == subscribe_seq_.end()) {
+            return std::nullopt;
+        }
+        return mark->second.epoch;
+    }
+
+    void ForwardingBase::SeedSequence(std::uint64_t track_fullname_hash,
+                                      NodeIdValueType source,
+                                      std::uint16_t seq,
+                                      std::uint16_t epoch)
+    {
+        std::lock_guard _(mutex_);
+        auto& record = subscribe_seq_[{ track_fullname_hash, source }];
+        record.epoch = epoch;
+        record.seq = seq;
+        record.withdrawn = false;
+        record.discard_at.reset();
+    }
+
+    std::vector<SavedSubscribeSequence> ForwardingBase::SequencesFor(NodeIdValueType source)
+    {
+        std::lock_guard _(mutex_);
+        ExpireSubscribeSequencesUnlocked(std::chrono::steady_clock::now());
+
+        std::vector<SavedSubscribeSequence> rows;
+        for (const auto& [key, record] : subscribe_seq_) {
+            if (key.second == source) {
+                rows.push_back(SavedSubscribeSequence{ key.first, record.epoch, record.seq });
+            }
+        }
+        return rows;
+    }
+
+    void ForwardingBase::NoteSourceUnreachableUnlocked(NodeIdValueType source,
+                                                       std::chrono::steady_clock::time_point now)
+    {
+        if (local_node_id_ != 0 && source == local_node_id_) {
+            return;
+        }
+
+        const auto deadline = now + kSubscribeSeqRetention;
+        for (const auto& [hash, by_source] : subscribes_) {
+            const auto it = by_source.find(source);
+            if (it == by_source.end()) {
+                continue;
+            }
+            const auto key = std::make_pair(hash, source);
+            const auto entry_epoch = it->second.details.epoch;
+            const auto entry_seq = it->second.details.seq;
+            const auto mark = subscribe_seq_.find(key);
+            if (mark == subscribe_seq_.end()) {
+                auto& record = subscribe_seq_[key];
+                record.epoch = entry_epoch;
+                record.seq = entry_seq;
+            } else if (mark->second.epoch == entry_epoch && SequenceIsNewer(entry_seq, mark->second.seq)) {
+                mark->second.seq = entry_seq;
             }
         }
 
-        return false;
+        for (auto& [key, record] : subscribe_seq_) {
+            if (key.second != source) {
+                continue;
+            }
+            // A later observation of the same removal must not extend the interval.
+            if (!record.discard_at || deadline < *record.discard_at) {
+                record.discard_at = deadline;
+            }
+        }
+    }
+
+    void ForwardingBase::NoteSourceReachableUnlocked(NodeIdValueType /*source*/)
+    {
+        // A node advertisement means the source is reachable again. The retention interval
+        // still ends 30 seconds after this receiver removed the source. Only a greater
+        // subscribe sequence in the same epoch cancels it. A different epoch does not.
+    }
+
+    void ForwardingBase::ExpireSubscribeSequencesUnlocked(std::chrono::steady_clock::time_point now)
+    {
+        for (auto it = subscribe_seq_.begin(); it != subscribe_seq_.end();) {
+            if (!it->second.discard_at || now < *it->second.discard_at) {
+                ++it;
+                continue;
+            }
+
+            const auto hash = it->first.first;
+            const auto source = it->first.second;
+            it = subscribe_seq_.erase(it);
+
+            if (const auto track = subscribes_.find(hash); track != subscribes_.end()) {
+                track->second.erase(source);
+                if (track->second.empty()) {
+                    subscribes_.erase(track);
+                }
+            }
+        }
     }
 
     std::optional<SubscribeInfo> ForwardingBase::GetSubscribe(uint64_t track_fullname_hash, NodeIdValueType src_node_id)
@@ -498,5 +722,81 @@ namespace moq::peering {
         }
 
         return counts;
+    }
+
+    bool SaveSubscribeSequenceFile(const std::filesystem::path& path, const std::vector<SavedSubscribeSequence>& rows)
+    {
+        std::error_code ec;
+        if (const auto parent = path.parent_path(); !parent.empty()) {
+            std::filesystem::create_directories(parent, ec);
+        }
+
+        const auto temporary = std::filesystem::path(path.string() + ".tmp");
+        {
+            std::ofstream out(temporary, std::ios::trunc);
+            if (!out) {
+                return false;
+            }
+
+            const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+            out << "2 " << now << '\n';
+            for (const auto& row : rows) {
+                out << row.track_hash << ' ' << row.epoch << ' ' << row.seq << '\n';
+            }
+            out.close();
+            if (!out) {
+                std::filesystem::remove(temporary, ec);
+                return false;
+            }
+        }
+
+        std::filesystem::rename(temporary, path, ec);
+        if (ec) {
+            std::filesystem::remove(temporary, ec);
+            return false;
+        }
+        return true;
+    }
+
+    std::vector<SavedSubscribeSequence> LoadSubscribeSequenceFile(const std::filesystem::path& path)
+    {
+        std::ifstream in(path);
+        if (!in) {
+            return {};
+        }
+
+        int version = 0;
+        long long stamp = 0;
+        in >> version >> stamp;
+        if (!in || (version != 1 && version != 2) || stamp <= 0) {
+            return {};
+        }
+        // The saved counter is still the last epoch and sequence this source sent, however old the file is.
+        // A source that has the number continues from it. Version 1 has no epoch and continues at epoch 0.
+
+        std::vector<SavedSubscribeSequence> rows;
+        std::uint64_t hash = 0;
+        unsigned int epoch = 0;
+        unsigned int seq = 0;
+        if (version == 1) {
+            while (in >> hash >> seq) {
+                if (seq > 65535) {
+                    continue;
+                }
+                rows.push_back(SavedSubscribeSequence{ hash, 0, static_cast<std::uint16_t>(seq) });
+            }
+            return rows;
+        }
+
+        while (in >> hash >> epoch >> seq) {
+            if (epoch > 65535 || seq > 65535) {
+                continue;
+            }
+            rows.push_back(
+              SavedSubscribeSequence{ hash, static_cast<std::uint16_t>(epoch), static_cast<std::uint16_t>(seq) });
+        }
+        return rows;
     }
 }

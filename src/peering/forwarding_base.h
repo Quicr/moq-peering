@@ -8,15 +8,27 @@
 #include "peering/messages/subscribe_info.h"
 
 #include "quic_transport.h"
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <mutex>
-
+#include <optional>
 #include <set>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace moq::peering {
+
+    /// Last epoch and sequence this source sent for one track. Not a credential.
+    struct SavedSubscribeSequence
+    {
+        std::uint64_t track_hash{ 0 };
+        std::uint16_t epoch{ 0 };
+        std::uint16_t seq{ 0 };
+    };
 
     /**
      * @brief Forwarding information base
@@ -48,33 +60,77 @@ namespace moq::peering {
          * @brief Remove node from the info base
          */
         /// Drops the path to `node_id` learned on `peer_session_id`. Returns true when another
-        /// session still reaches that node.
+        /// session still reaches that node. A node with no remaining path starts the subscribe
+        /// sequence retention interval.
         bool RemoveNode(PeerSessionId peer_session_id, NodeIdValueType node_id);
 
-        /**
-         * @brief Purge peer session information
-         */
+        /// Nodes that were reached only through the purged session, with the advertisement to withdraw.
+        struct SessionPurge
+        {
+            std::vector<NodeIdValueType> gone;
+            std::vector<NodeInfo> nodes;
+        };
+
         /**
          * @brief Drop forwarding state installed by one peering session
          *
-         * @return Node ids that were reached only through this session
+         * @return Nodes that were reached only through this session
          */
-        std::vector<NodeIdValueType> PurgePeerSessionInfo(PeerSessionId peer_session_id);
+        SessionPurge PurgePeerSessionInfo(PeerSessionId peer_session_id);
 
         /**
          * @brief Add or update subscribe in the info base
-         * @details This will add or update a subscribe in the info base.
          *
-         * @returns True if subscribe is new
+         * @details Accepts the update only when its sequence is newer than the stored one, or when
+         *      no sequence is stored. The unsigned distance `(received - stored) mod 65536` is
+         *      newer for 1 through 32767, so 0 is newer than 65535. An equal or older sequence is
+         *      a delayed update and is ignored.
+         *
+         * @returns True when the subscribe was stored
          */
         bool AddSubscribe(const SubscribeInfo& subscribe_info);
 
         /**
          * @brief Remove subscribe from the info base
          *
+         * @details The sequence number is kept so a delayed advertisement cannot restore the entry.
+         *      `force` removes the entry when the source has left the node table and the sequence
+         *      is not newer. The stored sequence is still kept.
+         *
          * @returns True if the subscribe was removed
          */
-        bool RemoveSubscribe(const SubscribeInfo& subscribe_info);
+        bool RemoveSubscribe(const SubscribeInfo& subscribe_info, bool force = false);
+
+        /// How long a sequence is kept after its source leaves the node table. Not negotiated.
+        static constexpr std::chrono::seconds kSubscribeSeqRetention{ 30 };
+
+        /// The local node keeps its own sequences until the process restarts. Remote retention does not apply.
+        void SetLocalNode(NodeIdValueType node_id);
+
+        /// The source left the node table. Sequences for that source expire after kSubscribeSeqRetention.
+        void NoteSourceUnreachable(NodeIdValueType source, std::chrono::steady_clock::time_point now);
+
+        /// The source is reachable again. Reachability does not cancel retention and does not move
+        /// its deadline. A greater subscribe sequence in the same epoch is what cancels it.
+        void NoteSourceReachable(NodeIdValueType source);
+
+        /// Drops sequences whose retention interval has ended.
+        void ExpireSubscribeSequences(std::chrono::steady_clock::time_point now);
+
+        /// Greatest sequence accepted for this source and track, after applying retention.
+        std::optional<std::uint16_t> StoredSequence(std::uint64_t track_fullname_hash, NodeIdValueType source);
+
+        /// Epoch of the retained counter, after applying retention.
+        std::optional<std::uint16_t> StoredEpoch(std::uint64_t track_fullname_hash, NodeIdValueType source);
+
+        /// Restores a counter learned before this process started. Does not install a subscribe.
+        void SeedSequence(std::uint64_t track_fullname_hash,
+                          NodeIdValueType source,
+                          std::uint16_t seq,
+                          std::uint16_t epoch = 0);
+
+        /// Counters this node has stored for subscribes it originated.
+        std::vector<SavedSubscribeSequence> SequencesFor(NodeIdValueType source);
 
         /**
          * @brief Has Subscribers
@@ -348,7 +404,31 @@ namespace moq::peering {
         mutable std::recursive_mutex mutex_;
 
       private:
+        struct SubscribeSeqRecord
+        {
+            std::uint16_t epoch{ 0 };
+            std::uint16_t seq{ 0 };
+            /// True after a source withdrawal. An equal advertisement must not restore that entry.
+            /// A session drop clears the entry and leaves this false so the same sequence can resume.
+            bool withdrawn{ false };
+            std::optional<std::chrono::steady_clock::time_point> discard_at;
+        };
+
         static std::vector<std::size_t> PrefixHashNamespaceTuples(const NameSpace& name_space);
+        void NoteSourceUnreachableUnlocked(NodeIdValueType source, std::chrono::steady_clock::time_point now);
+        void NoteSourceReachableUnlocked(NodeIdValueType source);
+        void ExpireSubscribeSequencesUnlocked(std::chrono::steady_clock::time_point now);
+
+        NodeIdValueType local_node_id_{ 0 };
+        std::map<std::pair<std::uint64_t, NodeIdValueType>, SubscribeSeqRecord> subscribe_seq_;
     };
+
+    /// Writes track hashes, epochs, and sequence numbers. The file holds no credentials and no certificate.
+    bool SaveSubscribeSequenceFile(const std::filesystem::path& path,
+                                   const std::vector<SavedSubscribeSequence>& rows);
+
+    /// Empty when the file is missing or unreadable. A readable file is returned at any age.
+    /// The source still has the counter and continues from it. A version 1 file has no epoch and loads as epoch 0.
+    std::vector<SavedSubscribeSequence> LoadSubscribeSequenceFile(const std::filesystem::path& path);
 
 }

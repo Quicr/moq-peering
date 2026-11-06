@@ -39,7 +39,10 @@ namespace moq::peering {
         void SetDelegate(Delegate* delegate);
 
         void NodeReceived(PeerSessionId peer_session_id, const NodeInfo& node_info, bool withdraw);
-        void SubscribeInfoReceived(PeerSessionId peer_session_id, SubscribeInfo& subscribe_info, bool withdraw);
+        void SubscribeInfoReceived(PeerSessionId peer_session_id,
+                                    SubscribeInfo& subscribe_info,
+                                    bool withdraw,
+                                    bool ignore_sequence = false);
         void AnnounceInfoReceived(PeerSessionId peer_session_id, const AnnounceInfo& announce_info, bool withdraw);
 
         void SessionChanged(PeerSessionId peer_session_id,
@@ -112,6 +115,10 @@ namespace moq::peering {
         void NewPeerConnection(const std::shared_ptr<QuicConnection>& connection);
         void PeerConnectionClosed(uint64_t session_id);
         void CheckThread(int interval_ms);
+        void LoadSubscribeSequences();
+        void SaveSubscribeSequences();
+        /// Drops subscribes for a source that left the node table and forwards the withdrawal.
+        void ForwardWithdrawnSource(PeerSessionId from, NodeIdValueType source);
         bool CreatePeerSession(const std::string& host,
                                uint16_t port,
                                std::optional<std::uint64_t> metric = std::nullopt);

@@ -23,6 +23,7 @@ namespace {
 
         subscribe_info.track.name_space = NameSpace(std::string("namespace"));
         subscribe_info.track.name = { 't', 'r', 'a', 'c', 'k' };
+        subscribe_info.details.epoch = 3;
         subscribe_info.details.priority = 10;
         subscribe_info.details.delivery_timeout = 5000;
         subscribe_info.details.expires = 1000;
@@ -41,10 +42,12 @@ namespace {
         auto net_data = subscribe_info.Serialize(false, false, true);
 
         CHECK_EQ(net_data.size(), subscribe_info.SizeBytes());
+        CHECK_EQ(subscribe_info.details.epoch, 3);
         CHECK_EQ(subscribe_info.details.seq, 1);
 
         SubscribeInfo decoded_si(net_data);
 
+        CHECK_EQ(subscribe_info.details.epoch, decoded_si.details.epoch);
         CHECK_EQ(subscribe_info.details.seq, decoded_si.details.seq);
         CHECK_EQ(subscribe_info.track.source_node_id, decoded_si.track.source_node_id);
         CHECK_EQ(subscribe_info.details.track_hash.track_namespace_hash,
