@@ -523,7 +523,9 @@ namespace moq::peering {
                 prefix_lookup_announces_.erase(prefix_hash);
             }
 
-            anno_it->second.erase(announce_info.track.source_node_id);
+            if (anno_it->second.erase(announce_info.track.source_node_id) > 0) {
+                removed = true;
+            }
 
             if (anno_it->second.empty()) {
                 announces_.erase(anno_it);
